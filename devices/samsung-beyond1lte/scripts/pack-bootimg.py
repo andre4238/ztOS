@@ -79,10 +79,18 @@ def main() -> None:
     ap.add_argument("--cmdline", default="")
     ap.add_argument("--os-version", default="12.0.0")
     ap.add_argument("--patch-level", default="2022-11")
+    ap.add_argument("--pad", type=int, default=0,
+                    help="pad with zeros to this size (the partition size, e.g. RECOVERY "
+                         "16512*4096), so the stock AVB footer at the partition end is "
+                         "overwritten; S-Boot fails the Odin session otherwise")
     a = ap.parse_args()
     kernel = open(a.kernel, "rb").read()
     ramdisk = open(a.ramdisk, "rb").read() if a.ramdisk else b""
     img = build(kernel, ramdisk, a.cmdline, os_version_field(a.os_version, a.patch_level))
+    if a.pad:
+        if len(img) > a.pad:
+            raise SystemExit(f"image ({len(img)} bytes) larger than --pad {a.pad}")
+        img += b"\0" * (a.pad - len(img))
     with open(a.out, "wb") as f:
         f.write(img)
     print(f"{a.out}: {len(img)} bytes (kernel {len(kernel)}, ramdisk {len(ramdisk)})")

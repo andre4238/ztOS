@@ -36,6 +36,20 @@ git am /path/to/ztOS/devices/samsung-beyond1lte/uboot/0*.patch
 make O=out exynos9820-beyond1lte_defconfig && make O=out -j$(nproc)
 ```
 
+## Flashing
+
+- Use `samloader-rs` (topjohnwu) or heimdall natively on the host; USB passthrough in a VM
+  (Parallels) fails at the PIT transfer.
+- Pack with `pack-bootimg.py --pad $((16512*4096))` so the whole RECOVERY partition is
+  written and the stock AVB footer at its end is gone.
+- Download mode must show `KG STATE: Completed` (or Checking). With `Prenormal`, S-Boot
+  refuses every unofficial binary at the end of the session ("Only official released
+  binaries are allowed to be flashed (RECOVERY)", Odin `FAIL!`) even with `OEM LOCK: OFF (U)`.
+  Prenormal goes away once the phone has been online in Android long enough for
+  KnoxGuard to check in.
+- Boot straight into recovery after flashing (Vol Down + Power until black, then
+  Vol Up + Bixby + Power with USB connected); Android puts the stock recovery back otherwise.
+
 ## Next steps
 
 1. Stock firmware G973FXXUGHVJ5 at hand (restore path), backup of the stock recovery.
