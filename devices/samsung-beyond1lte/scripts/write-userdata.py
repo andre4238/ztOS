@@ -24,6 +24,17 @@ RAW, FILL, DONT_CARE, CRC32 = 0xCAC1, 0xCAC2, 0xCAC3, 0xCAC4
 CHUNK = 8 * 1024 * 1024
 
 
+def device_size(fd):
+    """Size of a disk device: lseek(SEEK_END) gives 0 for macOS raw disks."""
+    if sys.platform == "darwin":
+        import fcntl
+        DKIOCGETBLOCKSIZE, DKIOCGETBLOCKCOUNT = 0x40046418, 0x40086419
+        bs = struct.unpack("<I", fcntl.ioctl(fd, DKIOCGETBLOCKSIZE, b"\0" * 4))[0]
+        n = struct.unpack("<Q", fcntl.ioctl(fd, DKIOCGETBLOCKCOUNT, b"\0" * 8))[0]
+        return bs * n
+    return os.lseek(fd, 0, os.SEEK_END)
+
+
 def read_at(fd, off, size):
     os.lseek(fd, off, os.SEEK_SET)
     out = bytearray()
@@ -105,8 +116,9 @@ def main():
         if size > part_size:
             sys.exit(f"image ({size}) larger than userdata ({part_size})")
         out = os.open(part, os.O_RDWR)
-        if os.lseek(out, 0, os.SEEK_END) != part_size:
-            sys.exit(f"{part} is not {part_size} bytes: refusing")
+        have = device_size(out)
+        if have != part_size:
+            sys.exit(f"{part} is {have} bytes, the GPT says {part_size}: refusing")
 
         done = 0
         for kind, off, n, src in regs:
