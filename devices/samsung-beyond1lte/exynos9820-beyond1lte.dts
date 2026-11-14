@@ -36,3 +36,21 @@
 		status = "disabled";
 	};
 };
+
+/*
+ * While the panel runs on the S-Boot framebuffer (simpledrm, no DSI/panel
+ * driver), nothing claims its three rails and the regulator core switches them
+ * off 30 s after boot ("panel_vdd3: disabling"): the panel goes dark and needs
+ * its init sequence again.  Keep them on until the panel driver owns them.
+ */
+&panel_vddr {
+	regulator-always-on;
+};
+
+&panel_vdd3 {
+	regulator-always-on;
+};
+
+&panel_vci {
+	regulator-always-on;
+};
