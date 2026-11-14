@@ -41,7 +41,7 @@ make O=out exynos9820-beyond1lte_defconfig && make O=out -j$(nproc)
 
 - Use `samloader-rs` (topjohnwu) or heimdall natively on the host; USB passthrough in a VM
   (Parallels) fails at the PIT transfer.
-- S-Boot needs two things in a recovery image besides `SEANDROIDENFORCE`-free v1 header:
+- S-Boot needs two things in a recovery image (header v1, page 2048):
   a `recovery_dtbo` (otherwise `[DTB] dt table header check fail`, ODIN MODE "DT Load
   Fail") and a valid AVB hash footer (otherwise "AVB Fail"). The key may be our own;
   with an unlocked bootloader S-Boot only warns that it does not match the chain
