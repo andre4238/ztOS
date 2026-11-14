@@ -162,7 +162,7 @@ mkdir -p "$PKGCACHE" "$R/var/cache/pacman/pkg"
 mount --bind "$PKGCACHE" "$R/var/cache/pacman/pkg"
 rm -f "$R/etc/resolv.conf"; cp -L /etc/resolv.conf "$R/etc/resolv.conf"
 ch() { chroot "$R" /usr/bin/env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/bin HOME=/root LANG=C.UTF-8 "$@"; }
-P="pacman --disable-sandbox --noconfirm"
+P="pacman --disable-sandbox --disable-download-timeout --noconfirm"
 
 if [ "$TARGET" = starlte ] || [ "$TARGET" = beyond1lte ]; then
 	# the kernel is ztOS's own boot image there, never a package
