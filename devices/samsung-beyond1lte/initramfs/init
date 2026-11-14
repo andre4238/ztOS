@@ -1,0 +1,79 @@
+#!/bin/busybox sh
+# ztOS rescue initramfs for the Galaxy S10 (beyond1lte).
+#
+# First-boot bring-up: shows the state on the panel (fbcon on simpledrm) and
+# offers the phone over the USB cable as
+#   - a serial console (CDC ACM, /dev/ttyGS0 -> host /dev/cu.usbmodem*)
+#   - a network interface (CDC NCM): phone 172.16.42.1, host 172.16.42.2,
+#     telnet to 172.16.42.1 gives a root shell.
+# Nothing here writes to the UFS.
+
+/bin/busybox --install -s /bin
+export PATH=/bin
+
+mkdir -p /proc /sys /dev /tmp /run
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev 2>/dev/null
+mkdir -p /dev/pts && mount -t devpts devpts /dev/pts
+mount -t configfs configfs /sys/kernel/config 2>/dev/null
+mount -t debugfs debugfs /sys/kernel/debug 2>/dev/null
+
+log() { echo "[ztOS] $*"; echo "[ztOS] $*" > /dev/kmsg 2>/dev/null; }
+
+log "ztOS rescue on $(cat /proc/device-tree/model 2>/dev/null)"
+log "kernel $(uname -r)"
+
+# --- USB gadget ---------------------------------------------------------------
+G=/sys/kernel/config/usb_gadget/ztos
+setup_gadget() {
+	udc=""
+	for i in $(seq 1 20); do
+		udc=$(ls /sys/class/udc 2>/dev/null | head -n1)
+		[ -n "$udc" ] && break
+		sleep 1
+	done
+	if [ -z "$udc" ]; then
+		log "no USB device controller (/sys/class/udc empty)"
+		return 1
+	fi
+	mkdir -p $G && cd $G || return 1
+	echo 0x18d1 > idVendor          # Google
+	echo 0xd001 > idProduct         # same id postmarketOS uses for its rescue gadget
+	mkdir -p strings/0x409
+	echo "ztOS" > strings/0x409/manufacturer
+	echo "Galaxy S10 rescue" > strings/0x409/product
+	echo "ztos-s10" > strings/0x409/serialnumber
+	mkdir -p configs/c.1/strings/0x409
+	echo "ACM + NCM" > configs/c.1/strings/0x409/configuration
+	mkdir -p functions/acm.usb0 functions/ncm.usb0
+	ln -s functions/ncm.usb0 configs/c.1/ 2>/dev/null
+	ln -s functions/acm.usb0 configs/c.1/ 2>/dev/null
+	echo "$udc" > UDC && log "USB gadget on $udc (ACM + NCM)"
+	cd /
+}
+
+if setup_gadget; then
+	for i in $(seq 1 10); do
+		ip link show usb0 >/dev/null 2>&1 && break
+		sleep 1
+	done
+	ip addr add 172.16.42.1/24 dev usb0 2>/dev/null
+	ip link set usb0 up 2>/dev/null
+	log "usb0: $(ip -4 addr show usb0 2>/dev/null | awk '/inet /{print $2}')"
+	telnetd -l /bin/sh -b 172.16.42.1 2>/dev/null && log "telnet 172.16.42.1"
+	# serial console over the cable
+	( while true; do setsid getty -n -l /bin/sh 115200 /dev/ttyGS0 vt100; sleep 1; done ) &
+fi
+
+# --- what the panel shows -----------------------------------------------------
+log "UFS: $(ls /sys/block 2>/dev/null | tr '\n' ' ')"
+log "memory: $(awk '/MemTotal/{print $2 " kB"}' /proc/meminfo)"
+log "dmesg errors:"
+dmesg | grep -i -E "error|fail|defer" | tail -n 15
+
+# keep a shell on the panel console as well (no input yet without touch)
+while true; do
+	setsid sh -c 'exec sh </dev/tty1 >/dev/tty1 2>&1' 2>/dev/null
+	sleep 5
+done

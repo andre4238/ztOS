@@ -1,0 +1,38 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * Samsung Galaxy S10 (SM-G973F, beyond1lte) device tree.
+ *
+ * The S10 is the S10+ board (beyond2lte) with a smaller cell: same Exynos 9820,
+ * same 8 GiB memory map, same S6E3HA9 panel at 1440x3040 (the vendor tree has
+ * identical s6e3ha9_beyond1/beyond2 timings) fed by the same S2DOS05, same
+ * MAX77705.  So this file takes the S10+ tree and changes what differs.
+ *
+ * Unverified on the S10 and therefore left off for now: the touchscreen
+ * controller (the S10+ has a S6SY771 at 0x48; the S10 one is not confirmed).
+ */
+
+#include "exynos9820-beyond2lte.dts"
+
+/ {
+	model = "Samsung Galaxy S10 (SM-G973F)";
+	compatible = "samsung,beyond1lte", "samsung,exynos9820";
+
+	sound {
+		model = "Samsung Galaxy S10";
+	};
+};
+
+/*
+ * EB-BG973ABU, 3400 mAh.  Charge current kept below the S10+ value until the
+ * vendor battery,max_charging_current of the S10 is read.
+ */
+&battery {
+	charge-full-design-microamp-hours = <3400000>;
+	constant-charge-current-max-microamp = <2100000>;
+};
+
+&hsi2c10 {
+	touchscreen@48 {
+		status = "disabled";
+	};
+};
