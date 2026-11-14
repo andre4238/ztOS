@@ -8,13 +8,16 @@ console on the panel (simpledrm), UFS, USB gadget (serial + network). Boot log i
 | Part | State on the S10 |
 |---|---|
 | U-Boot (recovery partition) | runs; fastboot + USB mass storage |
-| Kernel 7.2 + S10Plus_Linux patches | boots (`maxcpus=1`) |
+| Kernel 7.2 + S10Plus_Linux patches | boots on 6 cores (`maxcpus=6`; the M4 pair fails the CTR_EL0.IDC capability check) |
 | Panel | simpledrm on the S-Boot framebuffer; DSI/DECON driver not yet |
+| GPU (Mali-G76 MP12) | panfrost, ztMETRO renders on it (`WLR_RENDER_DRM_DEVICE`); clock left at the firmware's |
+| ztOS | boots from USERDATA (`installer/ztos build --target beyond1lte`), ztMETRO runs |
 | UFS | works (`sda`–`sde`) |
 | USB gadget | ACM + NCM |
 | Wi-Fi (BCM4375, PCIe) | found, firmware missing |
 | Audio (Madera) | deferred (regulators) |
-| Touchscreen | off in the DT until the controller is confirmed |
+| Touchscreen (S6SY771) | works (mainline s6sy761 driver) |
+| Buttons, haptics, hall sensor, headset jack | detected |
 
 The S10 is the S10+ (`beyond2lte`) board with a smaller battery: same Exynos 9820,
 same S6E3HA9 panel (1440x3040), same S2DOS05 display PMIC, same MAX77705 charger,
@@ -24,7 +27,7 @@ from the S10e (`beyond0lte`) port where the S10+ does not have them yet.
 | Part | Base | Here |
 |---|---|---|
 | Bootloader | upstream U-Boot `211de43d` + the S10+ patches of [gangg111/S10Plus_Linux](https://github.com/gangg111/S10Plus_Linux) (`patches-uboot/`) | `uboot/0001-…` adds the S10 board (device tree, defconfig) |
-| Kernel | mainline + the Exynos 9820 work of [chiffathefox/exynos-9820-mainline-linux](https://github.com/chiffathefox/exynos-9820-mainline-linux) and the S10+ patches (`patches/`) | next step |
+| Kernel | mainline v7.2.0 + the S10+ patches (`patches/`) | `scripts/build-kernel.sh`, `exynos9820-beyond1lte.dts`, `ztos-rescue.config` |
 | Later | modem, cameras, always-on display, sensor hub from [pulpoff/linux-beyond0lte](https://github.com/pulpoff/linux-beyond0lte) (S10e) | |
 
 ## Boot path (safe by design)
