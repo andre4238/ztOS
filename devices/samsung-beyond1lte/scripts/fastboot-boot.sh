@@ -21,7 +21,8 @@ FB=${FASTBOOT:-fastboot}
 KERNEL_ADDR=0x98200000      # 2 MiB aligned, kernel + bss up to 0x9fffffff
 FDT_ADDR=0xa0000000
 INITRD_ADDR=0xa0200000
-ARGS="console=tty0 clk_ignore_unused pd_ignore_unused maxcpus=1 loglevel=7 rdinit=/init $EXTRA"
+MAXCPUS=${MAXCPUS:-6}       # 6: A55 x4 + A75 x2; the M4 pair waits for cpufreq/thermal
+ARGS="console=tty0 clk_ignore_unused pd_ignore_unused maxcpus=$MAXCPUS loglevel=7 rdinit=/init $EXTRA"
 
 size() { stat -f %z "$1" 2>/dev/null || stat -c %s "$1"; }
 hex() { printf '0x%x' "$1"; }
