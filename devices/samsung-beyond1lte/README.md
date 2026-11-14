@@ -1,7 +1,20 @@
 # ztOS on the Samsung Galaxy S10 (SM-G973F, `beyond1lte`)
 
-Status: **in development** – U-Boot boots from the recovery partition (2026-11-14):
-boot menu on the panel, fastboot and USB mass storage over the cable. No kernel yet.
+Status: **in development**. 2026-11-14: U-Boot boots from the recovery partition (menu,
+fastboot, USB mass storage), and Linux 7.2 boots from RAM into the rescue initramfs:
+console on the panel (simpledrm), UFS, USB gadget (serial + network). Boot log in
+`logs/`.
+
+| Part | State on the S10 |
+|---|---|
+| U-Boot (recovery partition) | runs; fastboot + USB mass storage |
+| Kernel 7.2 + S10Plus_Linux patches | boots (`maxcpus=1`) |
+| Panel | simpledrm on the S-Boot framebuffer; DSI/DECON driver not yet |
+| UFS | works (`sda`–`sde`) |
+| USB gadget | ACM + NCM |
+| Wi-Fi (BCM4375, PCIe) | found, firmware missing |
+| Audio (Madera) | deferred (regulators) |
+| Touchscreen | off in the DT until the controller is confirmed |
 
 The S10 is the S10+ (`beyond2lte`) board with a smaller battery: same Exynos 9820,
 same S6E3HA9 panel (1440x3040), same S2DOS05 display PMIC, same MAX77705 charger,
@@ -63,6 +76,19 @@ make O=out exynos9820-beyond1lte_defconfig && make O=out -j$(nproc)
   KnoxGuard to check in.
 - Boot straight into recovery after flashing (Vol Down + Power until black, then
   Vol Up + Bixby + Power with USB connected); Android puts the stock recovery back otherwise.
+
+## Booting a kernel from RAM
+
+```sh
+# phone in the U-Boot menu: "Enter Fastboot Mode", then unplug/plug the cable
+scripts/fastboot-boot.sh Image exynos9820-beyond1lte.dtb initramfs.cpio.gz
+scripts/rescue-shell.py 'uname -a; dmesg | tail'     # serial console over USB
+```
+
+Load addresses come from U-Boot's lmb (`bdinfo`): the boot loader keeps no-map
+regions at 0x87000000, 0x91200000 and 0x96000000-0x981fffff; the kernel goes to
+0x98200000. U-Boot has no RAW_INITRD, so the initramfs gets a legacy header
+(`scripts/mkuinitrd.py`).
 
 ## Next steps
 

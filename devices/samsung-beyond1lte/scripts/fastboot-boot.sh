@@ -7,9 +7,10 @@
 # The phone must be in "Enter Fastboot Mode" of the U-Boot menu (after a reset
 # with the cable in, unplug and plug the cable once). Needs fastboot oem run.
 #
-# Addresses lie in the first RAM bank (0x80000000 + 0x3ab00000, the first page
-# is reserved); U-Boot itself, its fastboot buffer and the framebuffer at
-# 0xca000000 are all above.
+# Addresses lie in the largest free block of the first RAM bank, as U-Boot's
+# lmb shows it (bdinfo): 0x98200000-0xbaafffff. Below it are no-map regions the
+# boot loader keeps (0x87000000-0x871fffff, 0x91200000, 0x96000000-0x981fffff);
+# a copy into one of them hangs U-Boot. The fastboot buffer is 0xd8000000.
 set -euo pipefail
 IMAGE=$1
 DTB=$2
@@ -17,9 +18,9 @@ INITRD=$3
 EXTRA=${4:-}
 FB=${FASTBOOT:-fastboot}
 
-KERNEL_ADDR=0x82000000      # 2 MiB aligned, room for ~110 MiB kernel + bss
-FDT_ADDR=0x89000000
-INITRD_ADDR=0x8a000000
+KERNEL_ADDR=0x98200000      # 2 MiB aligned, kernel + bss up to 0x9fffffff
+FDT_ADDR=0xa0000000
+INITRD_ADDR=0xa0200000
 ARGS="console=tty0 clk_ignore_unused pd_ignore_unused maxcpus=1 loglevel=7 rdinit=/init $EXTRA"
 
 size() { stat -f %z "$1" 2>/dev/null || stat -c %s "$1"; }
@@ -34,14 +35,18 @@ put() { # file address
 }
 
 "$FB" devices | grep -q fastboot || { echo "no fastboot device"; exit 1; }
+# U-Boot wants the initramfs with a legacy image header (no RAW_INITRD).
+UINITRD=$(mktemp -t uinitrd)
+trap 'rm -f "$UINITRD"' EXIT
+python3 -I "$(dirname "$0")/mkuinitrd.py" "$INITRD" "$UINITRD"
 put "$IMAGE" $KERNEL_ADDR
 put "$DTB" $FDT_ADDR
-put "$INITRD" $INITRD_ADDR
+put "$UINITRD" $INITRD_ADDR
 oem "setenv bootargs $ARGS"
 # Not "oem run:booti": that would leave U-Boot from inside the USB request.
 # "fastboot boot" answers OKAY first and then runs fastboot_bootcmd, the way
 # U-Boot means a fastboot boot to happen. The file it sends is a dummy.
-oem "setenv fastboot_bootcmd booti $KERNEL_ADDR $INITRD_ADDR:$(hex "$(size "$INITRD")") $FDT_ADDR"
+oem "setenv fastboot_bootcmd booti $KERNEL_ADDR $INITRD_ADDR $FDT_ADDR"
 echo "--- booti, args: $ARGS"
 "$FB" boot "$DTB" || true
 echo "started; watch the panel. The rescue gadget appears as 'Galaxy S10 rescue'."
