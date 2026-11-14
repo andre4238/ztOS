@@ -1,0 +1,3 @@
+# ztOSCoreSensorFramework (Galaxy S10, bring-up): no phone hardware wired to
+# ztOS yet; only the session's own pieces are watched.
+session|ztapps||App list

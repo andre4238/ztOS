@@ -1,0 +1,20 @@
+# ztOSIAL manifest: Samsung Galaxy S10 (SM-G973F, beyond1lte), Exynos 9820.
+#
+# Bring-up: only what runs on the mainline kernel today is named here. No
+# battery/charger node yet (max77705 probes without its of_node), no modem,
+# audio or sensors; every interface stays generic and ztOS hides what is not
+# there, as in the emulator. Grows with the port.
+
+[device]
+codename = "samsung-beyond1lte"
+name = "Samsung Galaxy S10"
+form_factor = "phone"
+scale = 2.5
+
+[gsi]
+min = "0.2.0"
+
+[android]
+binder = "binderfs"
+gralloc = "gbm"
+memory_budget_mb = 2048

@@ -1,0 +1,5 @@
+# ztOS on the Galaxy S10 (beyond1lte): the kernel is our own (U-Boot boots it
+# from the recovery partition), never a package.
+
+# ssh over the USB link (172.16.42.1) while the phone is brought up
+openssh

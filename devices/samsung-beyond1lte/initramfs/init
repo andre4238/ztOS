@@ -24,6 +24,49 @@ log() { echo "[ztOS] $*"; echo "[ztOS] $*" > /dev/kmsg 2>/dev/null; }
 log "ztOS rescue on $(cat /proc/device-tree/model 2>/dev/null)"
 log "kernel $(uname -r)"
 
+# --- ztOS root ----------------------------------------------------------------
+# The system lives on USERDATA as an ext4 labelled ZR_ARCH (installer target
+# beyond1lte). Found and intact: hand over to its systemd. Missing, broken, or
+# ztos.rescue=1 on the command line: stay here with USB access (below).
+arg() {
+	for a in $(cat /proc/cmdline); do
+		case "$a" in "$1"=*) echo "${a#*=}" ;; esac
+	done
+}
+
+try_root() {
+	if [ "$(arg ztos.rescue)" = 1 ]; then
+		log "rescue requested on the command line"
+		return 1
+	fi
+	ROOTDEV=
+	for i in $(seq 1 20); do
+		ROOTDEV=$(findfs LABEL=ZR_ARCH 2>/dev/null) && [ -n "$ROOTDEV" ] && break
+		sleep 0.5
+	done
+	if [ -z "$ROOTDEV" ]; then
+		log "no filesystem labelled ZR_ARCH: rescue mode"
+		return 1
+	fi
+	mkdir -p /newroot
+	if ! mount -t ext4 -o ro "$ROOTDEV" /newroot; then
+		log "mounting $ROOTDEV failed: rescue mode"
+		return 1
+	fi
+	if [ ! -e /newroot/sbin/init ]; then
+		umount /newroot
+		log "no /sbin/init on $ROOTDEV: rescue mode"
+		return 1
+	fi
+	log "ztOS on $ROOTDEV: switch_root"
+	mount --move /proc /newroot/proc
+	mount --move /sys /newroot/sys
+	mount --move /dev /newroot/dev
+	exec switch_root /newroot /sbin/init
+}
+
+try_root
+
 # --- USB gadget ---------------------------------------------------------------
 G=/sys/kernel/config/usb_gadget/ztos
 setup_gadget() {
