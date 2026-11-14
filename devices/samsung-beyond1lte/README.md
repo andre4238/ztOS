@@ -1,6 +1,7 @@
 # ztOS on the Samsung Galaxy S10 (SM-G973F, `beyond1lte`)
 
-Status: **in development** – nothing of this has been flashed to a phone yet.
+Status: **in development** – U-Boot boots from the recovery partition (2026-11-14):
+boot menu on the panel, fastboot and USB mass storage over the cable. No kernel yet.
 
 The S10 is the S10+ (`beyond2lte`) board with a smaller battery: same Exynos 9820,
 same S6E3HA9 panel (1440x3040), same S2DOS05 display PMIC, same MAX77705 charger,
@@ -40,8 +41,21 @@ make O=out exynos9820-beyond1lte_defconfig && make O=out -j$(nproc)
 
 - Use `samloader-rs` (topjohnwu) or heimdall natively on the host; USB passthrough in a VM
   (Parallels) fails at the PIT transfer.
-- Pack with `pack-bootimg.py --pad $((16512*4096))` so the whole RECOVERY partition is
-  written and the stock AVB footer at its end is gone.
+- S-Boot needs two things in a recovery image besides `SEANDROIDENFORCE`-free v1 header:
+  a `recovery_dtbo` (otherwise `[DTB] dt table header check fail`, ODIN MODE "DT Load
+  Fail") and a valid AVB hash footer (otherwise "AVB Fail"). The key may be our own;
+  with an unlocked bootloader S-Boot only warns that it does not match the chain
+  descriptor. So:
+  ```sh
+  scripts/repack-recovery.py lineage-recovery.img u-boot.bin recovery-uboot.img
+  avbtool add_hash_footer --image recovery-uboot.img --partition_name recovery \
+      --partition_size $((16512*4096)) --algorithm SHA256_RSA4096 --key own.pem \
+      --rollback_index 1
+  ```
+  The LineageOS `recovery.img` for beyond1lte provides header and `recovery_dtbo`.
+- Once U-Boot runs, `fastboot flash recovery …` from its menu replaces download mode.
+  After a reset with the cable in, unplug and plug the cable once so the host sees it.
+- Backup: menu entry "USB mass storage" exports UFS LUN 0 (all 31 partitions).
 - Download mode must show `KG STATE: Completed` (or Checking). With `Prenormal`, S-Boot
   refuses every unofficial binary at the end of the session ("Only official released
   binaries are allowed to be flashed (RECOVERY)", Odin `FAIL!`) even with `OEM LOCK: OFF (U)`.
