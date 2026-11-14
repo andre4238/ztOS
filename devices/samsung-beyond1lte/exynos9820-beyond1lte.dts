@@ -7,8 +7,8 @@
  * identical s6e3ha9_beyond1/beyond2 timings) fed by the same S2DOS05, same
  * MAX77705.  So this file takes the S10+ tree and changes what differs.
  *
- * Unverified on the S10 and therefore left off for now: the touchscreen
- * controller (the S10+ has a S6SY771 at 0x48; the S10 one is not confirmed).
+ * The touchscreen is the S10+ one as well: the stock dtbo of the S10 names
+ * tsp_sec/y771_beyond1_phole.bin, i.e. a S6SY771 like on the S10+.
  */
 
 #include "exynos9820-beyond2lte.dts"
@@ -29,12 +29,6 @@
 &battery {
 	charge-full-design-microamp-hours = <3400000>;
 	constant-charge-current-max-microamp = <2100000>;
-};
-
-&hsi2c10 {
-	touchscreen@48 {
-		status = "disabled";
-	};
 };
 
 /*
