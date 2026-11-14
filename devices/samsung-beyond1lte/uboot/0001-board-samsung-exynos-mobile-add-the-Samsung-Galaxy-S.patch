@@ -1,7 +1,7 @@
 From 9d2ccf48140dd3c96606d8b1e7d7a1ecbf921154 Mon Sep 17 00:00:00 2001
 From: johnnyguma <Johnnyguma17@gmail.com>
 Date: Sat, 14 Nov 2026 20:27:05 +0100
-Subject: [PATCH] board: samsung: exynos-mobile: add the Samsung Galaxy S10
+Subject: [PATCH 1/2] board: samsung: exynos-mobile: add the Samsung Galaxy S10
  (beyond1lte)
 
 The S10 shares the S10+ board, its S6E3HA9 panel (1440x3040), the S2DOS05
