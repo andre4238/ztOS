@@ -1,0 +1,48 @@
+#!/bin/sh
+# Galaxy S10: the firmware the mainline drivers need, taken from the phone's own
+# vendor partition (mounted read-only) and its Wi-Fi MAC from efs (read-only).
+# Samsung's files are not ztOS's to ship, so every phone fills them in itself.
+#
+# Wi-Fi: BCM4375 rev 5 (B1) on PCIe, brcmfmac. The firmware is Samsung's
+# bcmdhd_sta.bin_b1; the board file is the Semco module's nvram (the Murata
+# 1rh_es43 one is the other B1 candidate: ZTOS_WIFI_NVRAM= picks it).
+set -eu
+B=/usr/lib/firmware/brcm
+STAMP=/var/lib/ztos/s10-firmware
+NVRAM=${ZTOS_WIFI_NVRAM:-nvram.txt_CS01_semco_b1}
+V=/run/ztos-vendor
+E=/run/ztos-efs
+
+[ -f "$STAMP" ] && [ -f "$B/brcmfmac4375-pcie.bin" ] && exit 0
+
+part() { readlink -f "/dev/disk/by-partlabel/$1"; }
+mkdir -p "$V" "$E" "$B" "$(dirname "$STAMP")"
+mount -o ro "$(part vendor)" "$V"
+trap 'umount "$V" 2>/dev/null; umount "$E" 2>/dev/null' EXIT
+
+F=$V/firmware
+install -m644 "$F/bcmdhd_sta.bin_b1" "$B/brcmfmac4375-pcie.bin"
+install -m644 "$F/bcmdhd_clm.blob" "$B/brcmfmac4375-pcie.clm_blob"
+grep -v '^macaddr=' "$F/$NVRAM" > "$B/brcmfmac4375-pcie.txt"
+
+# the MAC Android uses, so the phone keeps its address on the network
+if mount -o ro,noload "$(part efs)" "$E" 2>/dev/null; then
+	mac=$(tr -d '\n\r ' < "$E/wifi/.mac.info" 2>/dev/null || true)
+	case "$mac" in
+		??:??:??:??:??:??) echo "macaddr=$mac" >> "$B/brcmfmac4375-pcie.txt" ;;
+	esac
+fi
+cp "$B/brcmfmac4375-pcie.txt" "$B/brcmfmac4375-pcie.samsung,beyond1lte.txt"
+
+# Bluetooth (BCM4375B1 over UART), for when hci_uart_bcm is wired up
+[ -f "$F/bcm4375B1_semco.hcd" ] && install -m644 "$F/bcm4375B1_semco.hcd" "$B/BCM4375B1.hcd"
+
+date -u +%FT%TZ > "$STAMP"
+
+# brcmfmac gave up at boot without the firmware: probe the chip again
+pci=/sys/bus/pci/devices/0000:01:00.0
+if [ -e "$pci" ] && ! ls /sys/class/net | grep -q '^wl'; then
+	echo 1 > "$pci/remove"
+	sleep 1
+	echo 1 > /sys/bus/pci/rescan
+fi
