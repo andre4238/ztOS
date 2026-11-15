@@ -575,6 +575,12 @@ struct zt_server {
 	char start_wall_path[256], lock_wall_path[256];
 	struct zt_layer wall_layer;
 	double wall_h;			/* points: the start photo's height */
+	/* config start_background = full: the photo behind all of Start, between
+	 * the tiles too (Windows 10 Mobile), not only through them (8.1); the
+	 * accent tiles then show it through tile_transparency percent of their
+	 * colour, tiles of their own colour stay solid */
+	bool wall_full;
+	int tile_transparency;
 	cairo_surface_t *lock_wall;
 	bool locked;
 	bool call_over_lock;	/* only the phone call may cover the lock */
@@ -2986,6 +2992,8 @@ static void load_config(struct zt_server *server) {
 		"%s", "/usr/local/share/backgrounds/ztos/Lumia Cyan/Background_01.jpg");
 	snprintf(server->lock_wall_path, sizeof(server->lock_wall_path),
 		"%s", "/usr/local/share/backgrounds/ztos/Lumia Cyan lock screens/Wallpaper_01.jpg");
+	server->wall_full = false;
+	server->tile_transparency = 35;
 	server->haptics_enabled = true;
 	server->haptic_strength = 80;
 	for (int i = 0; i < 8; i++) {
@@ -3025,7 +3033,12 @@ static void load_config(struct zt_server *server) {
 		}
 		*eq = 0;
 		char *key = trim(line), *value = trim(eq + 1);
-		if (strcmp(key, "start_wallpaper") == 0) {
+		if (strcmp(key, "start_background") == 0) {
+			server->wall_full = strcmp(value, "full") == 0;
+		} else if (strcmp(key, "tile_transparency") == 0) {
+			int v = atoi(value);
+			server->tile_transparency = v < 0 ? 0 : v > 100 ? 100 : v;
+		} else if (strcmp(key, "start_wallpaper") == 0) {
 			snprintf(server->start_wall_path, sizeof(server->start_wall_path), "%s", value);
 		} else if (strcmp(key, "lock_wallpaper") == 0) {
 			snprintf(server->lock_wall_path, sizeof(server->lock_wall_path), "%s", value);
@@ -3656,17 +3669,31 @@ static void tile_badge(cairo_t *cr, const struct tile *t, const char *badge) {
 	}
 }
 
-static void draw_tile(struct zt_server *server, int i) {
-	struct tile *t = &server->tiles[i];
-	cairo_t *cr;
-	struct zt_buffer *buffer = zt_buffer_create(server, t->w, t->h, &cr);
-	if (server->wall_h > 0) {
-		/* a window onto Start's photo (wall_under), darkened a little */
+/* A tile face's ground. Without a photo: the tile's colour. With one, as in
+ * 8.1: a window onto it (wall_under), darkened a little. With the photo behind
+ * all of Start (start_background = full, as in Windows 10 Mobile): an accent
+ * tile is its colour at 100 - tile_transparency percent over the photo, and a
+ * tile with a colour of its own keeps it, solid. */
+static void tile_paint_face(struct zt_server *server, cairo_t *cr, const struct tile *t) {
+	if (server->wall_h > 0 && server->wall_full) {
+		double a = t->color == server->accent ? 1.0 - server->tile_transparency / 100.0 : 1.0;
+		cairo_set_source_rgba(cr, ((t->color >> 16) & 0xff) / 255.0, ((t->color >> 8) & 0xff) / 255.0,
+			(t->color & 0xff) / 255.0, a);
+	} else if (server->wall_h > 0) {
 		cairo_set_source_rgba(cr, 0, 0, 0, WALL_TINT);
 	} else {
 		set_rgb(cr, t->color);
 	}
+	cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
 	cairo_paint(cr);
+	cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
+}
+
+static void draw_tile(struct zt_server *server, int i) {
+	struct tile *t = &server->tiles[i];
+	cairo_t *cr;
+	struct zt_buffer *buffer = zt_buffer_create(server, t->w, t->h, &cr);
+	tile_paint_face(server, cr, t);
 	cairo_set_source_rgb(cr, 1, 1, 1);
 	/* a glyph made from an icon fills its box to the edge: a little smaller */
 	double k = t->icon[0] == '@' ? 0.86 : 1.0;
@@ -3785,12 +3812,7 @@ static void draw_tile_back(struct zt_server *server, int i) {
 	struct tile *t = &server->tiles[i];
 	cairo_t *cr;
 	struct zt_buffer *buffer = zt_buffer_create(server, t->w, t->h, &cr);
-	if (server->wall_h > 0) {
-		cairo_set_source_rgba(cr, 0, 0, 0, WALL_TINT);
-	} else {
-		set_rgb(cr, t->color);
-	}
-	cairo_paint(cr);
+	tile_paint_face(server, cr, t);
 	t->back_x = 8;
 	t->back_y = 8;
 	t->back_w = t->w - 16;
@@ -13350,6 +13372,16 @@ static void render_frame(struct zt_server *server) {
 		retro_draw(server, output->width, output->height, server->boot_logo_stage != 0, app_covers);
 	} else if (server->start_t < 0.999f && !app_covers) {
 		float page_dx = -server->page * (float)server->width;
+		if (server->wall_full && server->wall_h > 0 && server->page < 0.999f) {
+			/* the photo behind the whole of Start, under the status bar too,
+			 * sliding away with Start toward the app list */
+			float wm[16];
+			mat_identity(wm);
+			mat_translate(wm, page_dx, 0);
+			mat_scale(wm, (float)server->width, (float)server->height);
+			wall_under(server, wm, 0, server->scroll - STATUS_H, server->width, server->height,
+				1.0f - (float)server->start_t);
+		}
 		int n = server->page < 0.999f ? server->n_tiles : 0, draw_order[n > 0 ? n : 1];
 		float turns[n > 0 ? n : 1];
 		for (int i = 0; i < n; i++) {
@@ -13413,7 +13445,9 @@ static void render_frame(struct zt_server *server) {
 			mat_scale(m, t->press * grow, t->press * grow);
 			mat_translate(m, (float)(-t->w / 2), (float)(-t->h / 2));
 			mat_scale(m, (float)t->w, (float)t->h);
-			wall_under(server, m, t->x, t->y, t->w, t->h, alpha * dim);
+			if (!server->wall_full) {
+				wall_under(server, m, t->x, t->y, t->w, t->h, alpha * dim);
+			}
 			quad(server, GL_TEXTURE_2D, face->tex, m, alpha * dim, true, false,
 				(float)face->pw / face->tw, (float)face->ph / face->th);
 			if (face == &t->back_layer) {

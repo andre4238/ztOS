@@ -1,7 +1,9 @@
 # ztMETRO configuration, written by ztsettings
 accent = cobalt
-columns = 3
+columns = 4
 haptics = on
 timeout = 120
 lock = on
 menu_speed = 75
+start_background = full
+tile_transparency = 35
