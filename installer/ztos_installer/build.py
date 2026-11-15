@@ -265,6 +265,9 @@ ch fc-cache -f > /dev/null 2>&1 || true
 step "installing the ztOS SDK"
 rm -rf "$R/usr/local/lib/ztos-sdk"; mkdir -p "$R/usr/local/lib"
 cp -a "$SRC/sdk" "$R/usr/local/lib/ztos-sdk"
+# the SDK hashes the shell's shared render header with its C renderer: without
+# it, `ztos-sdk build` on the phone stops (FileNotFoundError)
+install -Dm644 "$SRC/ztmetro/core/zrnmetrorender.h" "$R/usr/local/lib/ztmetro/core/zrnmetrorender.h"
 ln -sf ../lib/ztos-sdk/bin/ztos-sdk "$R/usr/local/bin/ztos-sdk"
 S=$R/etc/skel/.local/share/ztos
 install -Dm644 "$SRC/sdk/runtime/zygote.py" "$S/zygote.py"

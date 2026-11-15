@@ -5,3 +5,4 @@ wide | steel | ZrnDevTest | code | zrndevtest
 medium | accent | Welcome | @os.ztos.welcome | /usr/local/lib/ztos/apps/os.ztos.welcome
 medium | accent | Updates | @os.ztos.updates | /usr/local/lib/ztos/apps/os.ztos.updates
 medium | accent | People | @ztcontacts | ztcontacts
+wide | accent | Weather | @os.ztos.weather | /usr/local/lib/ztos/apps/os.ztos.weather
