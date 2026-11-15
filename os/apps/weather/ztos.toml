@@ -1,0 +1,14 @@
+[app]
+id = "os.ztos.weather"
+name = "Weather"
+caps = "WEATHER"
+version = "1.0.0"
+entry = "main.py"
+icon = "icon.svg"
+description = "The weather now, by the hour and for ten days, with a live tile"
+performance = "eco"
+
+[build]
+include = ["**/*.py", "**/*.svg"]
+exclude = []
+dependencies = []
