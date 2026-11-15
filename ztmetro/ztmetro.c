@@ -573,6 +573,17 @@ struct zt_server {
 	 * as a texture taller than the screen for its parallax, the lock
 	 * screen's as an image painted under the clock */
 	char start_wall_path[256], lock_wall_path[256];
+	/* the island around a front camera hole (config island = on; island_*):
+	 * see "the island" */
+	bool island_on, island_calibrate;
+	float island_cx, island_cy, island_r;	/* points: the hole */
+	int island_mode;
+	char island_line[128], island_app[64], island_title[128], island_body[256];
+	float island_w, island_h, island_show;	/* animated: size (points), content 0..1 */
+	float island_drawn[3];
+	int island_drawn_mode;
+	struct wl_event_source *island_timer;
+	struct zt_layer island_layer;
 	struct zt_layer wall_layer;
 	double wall_h;			/* points: the start photo's height */
 	/* config start_background = full: the photo behind all of Start, between
@@ -2994,6 +3005,11 @@ static void load_config(struct zt_server *server) {
 		"%s", "/usr/local/share/backgrounds/ztos/Lumia Cyan lock screens/Wallpaper_01.jpg");
 	server->wall_full = false;
 	server->tile_transparency = 35;
+	server->island_on = false;
+	server->island_calibrate = false;
+	server->island_cx = 334.6f;
+	server->island_cy = 18.6f;
+	server->island_r = 10.8f;
 	server->haptics_enabled = true;
 	server->haptic_strength = 80;
 	for (int i = 0; i < 8; i++) {
@@ -3033,7 +3049,18 @@ static void load_config(struct zt_server *server) {
 		}
 		*eq = 0;
 		char *key = trim(line), *value = trim(eq + 1);
-		if (strcmp(key, "start_background") == 0) {
+		if (strcmp(key, "island") == 0) {
+			server->island_on = strcmp(value, "on") == 0;
+		} else if (strcmp(key, "island_calibrate") == 0) {
+			server->island_calibrate = strcmp(value, "on") == 0;
+		} else if (strcmp(key, "island_x") == 0) {
+			server->island_cx = (float)atof(value);
+		} else if (strcmp(key, "island_y") == 0) {
+			server->island_cy = (float)atof(value);
+		} else if (strcmp(key, "island_r") == 0) {
+			float r = (float)atof(value);
+			server->island_r = r < 4.0f ? 4.0f : r > 40.0f ? 40.0f : r;
+		} else if (strcmp(key, "start_background") == 0) {
 			server->wall_full = strcmp(value, "full") == 0;
 		} else if (strcmp(key, "tile_transparency") == 0) {
 			int v = atoi(value);
@@ -5436,7 +5463,10 @@ static void status_row(struct zt_server *server, cairo_t *cr, bool details, bool
 	 * about 6.8 % of the screen's width and 2.8 % of it high, and the clock's
 	 * digits are as tall as the battery. */
 	const double cell = round(server->width * 0.032 * 2) / 2;	/* battery cell height */
-	const double right = server->width - 14;			/* Start's own side margin */
+	double right = server->width - 14;			/* Start's own side margin */
+	if (server->island_on && server->island_cx - server->island_r - 8 < right) {
+		right = server->island_cx - server->island_r - 8;	/* left of the camera hole */
+	}
 	const double base = (STATUS_H + cell) / 2;	/* the baseline everything stands on */
 	double x = 14;
 	const double arrow = cell * 0.4;
@@ -5720,6 +5750,183 @@ static bool status_moving(struct zt_server *server) {
 		server->st_tech != server->st_drawn[1] || server->st_arrow != server->st_drawn[2] ||
 
 		want != server->st_arrow_at);
+}
+
+/* ---- the island --------------------------------------------------------------
+ * A phone with its front camera in a hole in the panel (the Galaxy S10: top
+ * right) can have a black capsule grow out of the hole for what is going on,
+ * with config island = on: charging (a bolt and the charge, for a moment),
+ * music playing (a note and the track, while it plays), and a notification
+ * (it opens downward into a card, in place of the toast). At rest it is a
+ * black disc on the hole, so nothing shows. The hole is island_x, island_y,
+ * island_r in points; island_calibrate = on rings where it is taken to be,
+ * to set them from a photo of the screen. */
+enum { ISL_IDLE, ISL_CHARGE, ISL_MEDIA, ISL_NOTE };
+#define ISL_PAD		3.0	/* points of black around the hole */
+#define ISL_COMPACT_W	156.0	/* the capsule's width, charging or playing */
+#define ISL_NOTE_H	78.0	/* the card's height */
+#define ISL_MS		380	/* how long it takes to grow or shrink */
+#define ISL_CHARGE_MS	3500
+#define ISL_NOTE_MS	4500
+
+static double island_h0(struct zt_server *server) {
+	return 2.0 * server->island_r + 2.0 * ISL_PAD;
+}
+
+static double island_right(struct zt_server *server) {
+	return server->island_cx + server->island_r + ISL_PAD;
+}
+
+static double island_top(struct zt_server *server) {
+	return server->island_cy - server->island_r - ISL_PAD;
+}
+
+static void island_target(struct zt_server *server) {
+	double h0 = island_h0(server), w = h0, h = h0;
+	if (server->island_mode == ISL_CHARGE || server->island_mode == ISL_MEDIA) {
+		w = ISL_COMPACT_W;
+	} else if (server->island_mode == ISL_NOTE) {
+		w = island_right(server) - 8.0;
+		h = ISL_NOTE_H;
+	}
+	bool idle = server->island_mode == ISL_IDLE;
+	animate(server, &server->island_w, (float)w, ISL_MS, 0, false);
+	animate(server, &server->island_h, (float)h, ISL_MS, 0, false);
+	/* the content fades in once there is room for it, and out at once */
+	animate(server, &server->island_show, idle ? 0.0f : 1.0f, idle ? 120 : 220, idle ? 0 : ISL_MS / 2, false);
+	damage(server);
+}
+
+/* After an event: the music if it plays, else the hole alone. */
+static void island_settle(struct zt_server *server) {
+	server->island_mode = server->media_playing ? ISL_MEDIA : ISL_IDLE;
+	if (server->island_mode == ISL_MEDIA) {
+		snprintf(server->island_line, sizeof(server->island_line), "%s%s%s",
+			server->media_title[0] ? server->media_title : "Playing",
+			server->media_artist[0] ? " \u2013 " : "", server->media_artist);
+	}
+	island_target(server);
+}
+
+static int island_timeout(void *data) {
+	island_settle(data);
+	return 0;
+}
+
+static void island_event(struct zt_server *server, int mode, uint32_t ms) {
+	server->island_mode = mode;
+	island_target(server);
+	if (ms && server->island_timer) {
+		wl_event_source_timer_update(server->island_timer, ms);
+	}
+}
+
+static void island_charging(struct zt_server *server, int percent) {
+	if (!server->island_on || server->width == 0) {
+		return;
+	}
+	if (percent >= 0) {
+		snprintf(server->island_line, sizeof(server->island_line), "Charging  %d%%", percent);
+	} else {
+		snprintf(server->island_line, sizeof(server->island_line), "Charging");
+	}
+	island_event(server, ISL_CHARGE, ISL_CHARGE_MS);
+}
+
+/* A notification, shown here instead of the toast: false when the island is off. */
+static bool island_note(struct zt_server *server, const char *app, const char *title, const char *text) {
+	if (!server->island_on || server->width == 0 || dots()) {
+		return false;
+	}
+	snprintf(server->island_app, sizeof(server->island_app), "%s", app);
+	snprintf(server->island_title, sizeof(server->island_title), "%s", title);
+	snprintf(server->island_body, sizeof(server->island_body), "%s", text);
+	island_event(server, ISL_NOTE, ISL_NOTE_MS);
+	return true;
+}
+
+/* The shell's "media" line changed (ztnotifyd: what plays, and whether it
+ * does): while something plays the island shows it, unless a moment of its
+ * own (charging, a notification) is on. */
+static void island_media(struct zt_server *server) {
+	if (!server->island_on || server->width == 0) {
+		return;
+	}
+	if (server->island_mode == ISL_IDLE || server->island_mode == ISL_MEDIA) {
+		island_settle(server);
+	}
+}
+
+/* Drawn over everything, the status bar included, every frame it shows. */
+static void island_render(struct zt_server *server) {
+	if (!server->island_on || dots()) {
+		return;
+	}
+	double w = server->island_w, h = server->island_h;
+	if (w < 1.0 || h < 1.0) {
+		server->island_w = server->island_h = (float)island_h0(server);
+		w = h = island_h0(server);
+	}
+	double x = island_right(server) - w, y = island_top(server);
+	float drawn[3] = { (float)w, (float)h, server->island_show };
+	if (!server->island_layer.tex || memcmp(drawn, server->island_drawn, sizeof(drawn)) ||
+			server->island_drawn_mode != server->island_mode) {
+		memcpy(server->island_drawn, drawn, sizeof(drawn));
+		server->island_drawn_mode = server->island_mode;
+		cairo_t *cr;
+		struct zt_buffer *buffer = zt_buffer_create(server, w, h, &cr);
+		cairo_set_operator(cr, CAIRO_OPERATOR_CLEAR);
+		cairo_paint(cr);
+		cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
+		double radius = h / 2.0 < 22.0 ? h / 2.0 : 22.0;
+		cairo_new_sub_path(cr);
+		cairo_arc(cr, w - radius, radius, radius, -M_PI / 2, 0);
+		cairo_arc(cr, w - radius, h - radius, radius, 0, M_PI / 2);
+		cairo_arc(cr, radius, h - radius, radius, M_PI / 2, M_PI);
+		cairo_arc(cr, radius, radius, radius, M_PI, 3 * M_PI / 2);
+		cairo_close_path(cr);
+		cairo_set_source_rgb(cr, 0, 0, 0);
+		cairo_fill(cr);
+		double h0 = island_h0(server);
+		if (server->island_show > 0.01f) {
+			cairo_push_group(cr);
+			if (server->island_mode == ISL_CHARGE || server->island_mode == ISL_MEDIA) {
+				bool charge = server->island_mode == ISL_CHARGE;
+				if (charge) {
+					cairo_set_source_rgb(cr, 0.18, 0.80, 0.35);
+				} else {
+					set_rgb(cr, server->accent);
+				}
+				draw_icon(cr, charge ? "bolt" : "music", 16.0, h0 / 2.0, 15.0);
+				cairo_set_source_rgb(cr, 1, 1, 1);
+				draw_text(cr, server->island_line, FONT_SEMIBOLD, 13, 30.0, h0 / 2.0 - 9.0,
+					w - 30.0 - h0, 18.0, false);
+			} else if (server->island_mode == ISL_NOTE) {
+				cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
+				draw_text(cr, server->island_app, FONT_SEMIBOLD, 12, 18.0, 9.0, w - 36.0 - h0, 16.0, false);
+				cairo_set_source_rgb(cr, 1, 1, 1);
+				draw_text(cr, server->island_title, FONT_SEMIBOLD, 16, 18.0, 27.0, w - 36.0, 22.0, false);
+				draw_text(cr, server->island_body, FONT_REGULAR, 14, 18.0, 50.0, w - 36.0, 20.0, false);
+			}
+			cairo_pop_group_to_source(cr);
+			cairo_paint_with_alpha(cr, server->island_show);
+		}
+		if (server->island_calibrate) {
+			/* where the hole is taken to be: a ring on its edge, a cross on its centre */
+			double cx = w - ISL_PAD - server->island_r, cy = ISL_PAD + server->island_r;
+			cairo_set_source_rgb(cr, 1, 1, 1);
+			cairo_set_line_width(cr, 1.0);
+			cairo_arc(cr, cx, cy, server->island_r, 0, 2 * M_PI);
+			cairo_stroke(cr);
+			cairo_move_to(cr, cx - 3, cy);
+			cairo_line_to(cr, cx + 3, cy);
+			cairo_move_to(cr, cx, cy - 3);
+			cairo_line_to(cr, cx, cy + 3);
+			cairo_stroke(cr);
+		}
+		zt_buffer_show(server, &server->island_layer, buffer, cr, w, h);
+	}
+	layer_draw(server, &server->island_layer, (float)x, (float)y, 1.0f);
 }
 
 static void draw_status(struct zt_server *server) {
@@ -6213,6 +6420,9 @@ static int net_tick(void *data) {
 		ui_sound(server, UIS_BATTERY_LOW);
 	}
 	if (charging != server->charging || (battery >= 0 && battery != server->battery_level)) {
+		if (charging && !server->charging) {
+			island_charging(server, battery);
+		}
 		server->charging = charging;
 		server->battery_level = battery;
 		snap(server, &server->st_plug, 1.0f);
@@ -10061,9 +10271,11 @@ static void note_add_from(struct zt_server *server, const char *who, const char 
 	if (server->width == 0) {
 		return;	/* no screen yet: it is in the list when there is one */
 	}
-	draw_toast(server);
-	animate(server, &server->toast_y, 1.0f, 300, 0, false);  /* swivel in */
-	wl_event_source_timer_update(server->toast_timer, TOAST_MS);
+	if (!island_note(server, app, title, text)) {
+		draw_toast(server);
+		animate(server, &server->toast_y, 1.0f, 300, 0, false);  /* swivel in */
+		wl_event_source_timer_update(server->toast_timer, TOAST_MS);
+	}
 	if (server->shade_open || server->shade_h > 0.1f) {
 		draw_shade(server);
 	}
@@ -12247,7 +12459,8 @@ static void ctl_command(struct zt_server *server, char *line) {
 		server->media_playing = strcmp(f[0], "Playing") == 0;
 		snprintf(server->media_title, sizeof(server->media_title), "%s", server->media ? f[1] : "");
 		snprintf(server->media_artist, sizeof(server->media_artist), "%s", server->media ? f[2] : "");
-		if (server->width > 0 && server->screen_on) {
+		island_media(server);
+		if (server->width > 0 && server->screen_on && !server->island_on) {
 			if (server->media && server->media_playing && (!was || !played || new_track)) {
 				/* something started: the banner comes down to say what */
 				draw_volume(server);
@@ -13637,6 +13850,7 @@ static void render_frame(struct zt_server *server) {
 		(retro_on(server) && server->locked);	/* it has its own status column, as its lock has */
 	if (!retro_home) {
 		layer_draw(server, &server->status_layer, 0, 0, 1.0f);
+		island_render(server);
 	}
 	if (server->charging && server->plug_layer.tex && !retro_on(server)) {
 		float a = server->battery_full ? 1.0f : server->st_plug;
@@ -13778,6 +13992,7 @@ static void render_frame(struct zt_server *server) {
 		wlr_xdg_surface_for_each_surface(server->shown->xdg_toplevel->base, draw_app_surface, &call_draw);
 		/* The call fills the margins; status glyphs still belong above it. */
 		layer_draw(server, &server->status_layer, 0, 0, 1.0f);
+		island_render(server);
 	}
 	if (server->splash && !animating(server, &server->lock_y) && server->lock_y >= 0.0f) {
 		server->splash = false;
@@ -14593,6 +14808,7 @@ int main(int argc, char *argv[]) {
 	server.st_plug = 1.0f;
 	server.charging = on_charger();
 	server.toast_timer = wl_event_loop_add_timer(server.loop, toast_hide, &server);
+	server.island_timer = wl_event_loop_add_timer(server.loop, island_timeout, &server);
 	server.home_flip_timer = wl_event_loop_add_timer(server.loop, home_flip_fired, &server);
 	server.signal_sweep_timer = wl_event_loop_add_timer(server.loop, signal_sweep_fired, &server);
 	server.home_flip_tile = -1;
