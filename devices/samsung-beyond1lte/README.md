@@ -80,6 +80,24 @@ make O=out exynos9820-beyond1lte_defconfig && make O=out -j$(nproc)
 - Boot straight into recovery after flashing (Vol Down + Power until black, then
   Vol Up + Bixby + Power with USB connected); Android puts the stock recovery back otherwise.
 
+## How the phone boots (2026-11-15)
+
+```
+power on -> S-Boot -> misc says "boot-recovery" -> RECOVERY = our U-Boot
+         -> bootcmd: load scsi 0#userdata /boot/ztos/{boot.env,Image,dtb,initrd.uimg}
+         -> booti -> initramfs finds LABEL=ZR_ARCH -> systemd -> ztMETRO
+```
+
+- `boot-recovery` in misc is kept by `ztos-s10-bootmode.service`; BOOT and vbmeta
+  stay Samsung's (BOOT is a hash in vbmeta, U-Boot there would fail verification).
+- The kernel command line is `/boot/ztos/boot.env` (`bootargs=...`), no U-Boot rebuild.
+- Menu: hold Volume Down while U-Boot starts. Recovery keys still reach U-Boot.
+- Development: `printf bootonce-bootloader` into misc + reboot = U-Boot fastboot once
+  (U-Boot clears it; write `boot-recovery` back with
+  `fastboot oem run:bcb load scsi 0 misc` / `bcb set command boot-recovery` / `bcb store`
+  before `fastboot reboot`, or let ztOS do it on its next boot).
+- U-Boot reads ext4 with the generic `load`; `ext4load` is not built in.
+
 ## Booting a kernel from RAM
 
 ```sh
