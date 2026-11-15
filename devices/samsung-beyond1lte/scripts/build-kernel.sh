@@ -28,6 +28,9 @@ if [ ! -d linux/.git ]; then
 	git -C linux checkout -q -b s10 FETCH_HEAD
 	git -C linux -c user.name="ztOS build" -c user.email="build@localhost" \
 		am -q --3way "$S10P"/patches/0*.patch
+	# ours on top: the cameras from the S10e port (+ CMU_ISPPRE), ...
+	git -C linux -c user.name="ztOS build" -c user.email="build@localhost" \
+		am -q --3way "$HERE"/kernel/0*.patch
 fi
 cd linux
 
