@@ -1,0 +1,11 @@
+[Unit]
+Description=Galaxy S10: S-Boot starts U-Boot (misc: boot-recovery)
+After=local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/ztos-s10-bootmode
+
+[Install]
+WantedBy=multi-user.target

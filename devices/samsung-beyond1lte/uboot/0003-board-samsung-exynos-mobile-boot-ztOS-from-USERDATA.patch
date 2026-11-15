@@ -1,0 +1,58 @@
+From f98741d90a633b9fc8b9a5814d1c7277b18f6afa Mon Sep 17 00:00:00 2001
+From: johnnyguma <Johnnyguma17@gmail.com>
+Date: Sun, 15 Nov 2026 01:05:51 +0100
+Subject: [PATCH] board: samsung: exynos-mobile: boot ztOS from USERDATA
+
+The S10 runs ztOS from an ext4 on USERDATA. bootcmd loads the kernel,
+device tree and initramfs from /boot/ztos there, with the command line
+in boot.env (env import), and boots them before the EFI boot manager;
+the menu stays the fallback.
+---
+ board/samsung/exynos-mobile/exynos-mobile.env | 25 ++++++++++++++++---
+ 1 file changed, 22 insertions(+), 3 deletions(-)
+
+diff --git a/board/samsung/exynos-mobile/exynos-mobile.env b/board/samsung/exynos-mobile/exynos-mobile.env
+index c94c4c27..57f6250f 100644
+--- a/board/samsung/exynos-mobile/exynos-mobile.env
++++ b/board/samsung/exynos-mobile/exynos-mobile.env
+@@ -34,15 +34,34 @@ preboot=run blkmapcmd
+ bootdelay=0
+ bootmenu_delay=-1
+ efiboot=bootefi bootmgr
+-bootcmd=bootefi bootmgr; run panel;
+-		echo "<-- EFI boot returned, menu in 5 s"; sleep 5; bootmenu
++/*
++ * ztOS (Galaxy S10): its root is an ext4 on USERDATA, and the kernel, device
++ * tree and initramfs (legacy ramdisk header) sit in /boot/ztos there, with the
++ * kernel command line in boot.env (bootargs=...), so it changes without a new
++ * U-Boot. The addresses are in the largest free block of the first bank; the
++ * boot loader keeps no-map regions below 0x98200000. Nothing there: the EFI
++ * boot as before, then the menu.
++ */
++ztos_kernel_r=0x98200000
++ztos_fdt_r=0xa0000000
++ztos_initrd_r=0xa0200000
++ztos_env_r=0xa1000000
++ztosboot=if ext4load scsi 0#userdata ${ztos_env_r} /boot/ztos/boot.env; then
++	env import -t ${ztos_env_r} ${filesize};
++	ext4load scsi 0#userdata ${ztos_kernel_r} /boot/ztos/Image &&
++	ext4load scsi 0#userdata ${ztos_fdt_r} /boot/ztos/exynos9820-beyond1lte.dtb &&
++	ext4load scsi 0#userdata ${ztos_initrd_r} /boot/ztos/initrd.uimg &&
++	booti ${ztos_kernel_r} ${ztos_initrd_r} ${ztos_fdt_r}; fi
++
++bootcmd=run ztosboot; bootefi bootmgr; run panel;
++		echo "<-- ztOS and EFI boot returned, menu in 5 s"; sleep 5; bootmenu
+ 
+ fastbootcmd=run panel; echo "Fastboot Mode";
+ 	fastboot -l $fastboot_addr_r usb 0;
+ 	echo "fastboot returned, menu in 5 s";
+ 	sleep 5
+ 
+-bootmenu_0=Continue Boot=run efiboot
++bootmenu_0=Start ztOS=run ztosboot; run efiboot
+ bootmenu_1=Enter Fastboot Mode=run fastbootcmd
+ bootmenu_2=UEFI Maintenance Menu=eficonfig
+ bootmenu_3=Reboot=reset
+-- 
+2.43.0
+

@@ -1,0 +1,24 @@
+#!/bin/sh
+# Galaxy S10: keep S-Boot starting the RECOVERY partition, where our U-Boot is
+# (and from there ztOS on USERDATA), instead of BOOT with Android's kernel.
+#
+# S-Boot follows the Android boot control block in misc: "boot-recovery" in its
+# command field makes every start go to RECOVERY. Nothing signed is touched:
+# BOOT and vbmeta stay Samsung's (BOOT is a hash in vbmeta, so a U-Boot there
+# would fail verification). Our U-Boot reads the same block for a one-time
+# "bootonce-bootloader" (fastboot) and clears that one itself; any other
+# command it leaves, and so does this script.
+set -eu
+m=$(readlink -f /dev/disk/by-partlabel/misc)
+cmd=$(dd if="$m" bs=32 count=1 status=none | tr -d '\000')
+case "$cmd" in
+	boot-recovery) exit 0 ;;
+	"") ;;
+	*) echo "misc asks for '$cmd': left as it is"; exit 0 ;;
+esac
+# struct bootloader_message: command[32] status[32] recovery[768] ...
+{ printf 'boot-recovery'; head -c 19 /dev/zero; } |
+	dd of="$m" bs=32 count=1 conv=notrunc,fsync status=none
+{ printf 'recovery\n'; head -c 759 /dev/zero; } |
+	dd of="$m" bs=64 seek=1 count=12 iflag=fullblock conv=notrunc,fsync status=none
+echo "misc: boot-recovery (S-Boot starts U-Boot, U-Boot starts ztOS)"

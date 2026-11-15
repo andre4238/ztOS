@@ -29,4 +29,4 @@ sed -i -e 's/Galaxy S9 Arch Linux ARM/Galaxy S10 ztOS/' -e 's/"starlte"/"beyond1
 touch "$R/etc/zboot-firstboot"
 chmod 755 "$R"/usr/local/sbin/* 2>/dev/null || true
 
-DEVICE_UNITS="zboot-usb-gadget zboot-firstboot sshd ztos-s10-firmware"
+DEVICE_UNITS="zboot-usb-gadget zboot-firstboot sshd ztos-s10-firmware ztos-s10-bootmode"
