@@ -23,6 +23,21 @@ The stock dtbo names the nodes `is_sensor_2l4@20`, `is_sensor_3p9@2D`, `is_senso
 `is_sensor_3j1@10`, `actuator-ak737x`; every pin, bus and rail has to be read from there
 for the S10 and not copied from the S10e (the wide sensor's address already differs).
 
+## Ultrawide (S5K3P9): S10 stock dtbo against the S10e DT (checked 2026-11-15)
+
+All nine hardware revisions of the S10's dtbo, resolved through `__fixups__`/`__local_fixups__`:
+
+| | S10e DT (pulpoff) | S10 stock dtbo |
+|---|---|---|
+| I2C | hsi2c_1, 0x2D | hsi2c_1 (`fragment@19`, `hsi2c1_bus`) on every revision; `hsi2c_2` (`fragment@125`) only on prototypes 0x11-0x15 |
+| MCLK | CIS_CLK3, gpc1-7 | `mclk_ch = 3`, `gpio_mclk = <&gpc1 7>` |
+| reset | gpg0-3 | `gpio_reset = <&gpg0 3>` |
+| PMIC | S2MPB02 0x59 on hsi2c_24 | `s2mpb02_pmic@59` in `fragment@74` (hsi2c_24) |
+| rails | buck2 1.3 V, ldo4 1.05 V, ldo8 1.8 V, ldo15 2.8 V | buck2 `VDD_EXT_1P3_PB02` 1.3 V, ldo4 `VDDD_1.05V_WIDESUB` 1.05 V, ldo8 `VDDIO_1.8V_WIDESUB` 1.8 V, ldo15 `VDDA_2.8V_WIDESUB` 2.8 V |
+
+So the S10e's ultrawide DT holds for the S10 as it is. The S10's other S2MPB02 rails are the
+tele's (`..._SUB`: ldo3 1.05 V, ldo7 1.8 V, ldo11 2.8 V, ldo12 AF 2.8 V) and OIS (ldo10).
+
 ## What the S10e camera commit brings, against our kernel (v7.2.0 + S10Plus_Linux)
 
 `git apply --check` of the 18 kernel files of that commit on our tree:
