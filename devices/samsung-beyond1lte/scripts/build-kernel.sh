@@ -35,7 +35,7 @@ fi
 cd linux
 
 # the S10 device tree, next to the S10+ one it includes
-install -m644 "$HERE/exynos9820-beyond1lte.dts" arch/arm64/boot/dts/exynos/
+install -m644 "$HERE/exynos9820-beyond1lte.dts" "$HERE/exynos9820-camera.dtsi" arch/arm64/boot/dts/exynos/
 grep -q "exynos9820-beyond1lte.dtb" arch/arm64/boot/dts/exynos/Makefile ||
 	sed -i 's/^\texynos9820-beyond2lte.dtb\t\\$/\texynos9820-beyond1lte.dtb\t\\\n&/' \
 		arch/arm64/boot/dts/exynos/Makefile

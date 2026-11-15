@@ -12,6 +12,7 @@
  */
 
 #include "exynos9820-beyond2lte.dts"
+#include "exynos9820-camera.dtsi"
 
 / {
 	model = "Samsung Galaxy S10 (SM-G973F)";
@@ -47,4 +48,100 @@
 
 &panel_vci {
 	regulator-always-on;
+};
+
+/*
+ * Cameras, step 2 of CAMERA.md: the rear ultrawide only. Every value below
+ * was checked against all revisions of this phone's stock dtbo (bus hsi2c_1
+ * at 0x2d, MCLK channel 3 on gpc1-7, reset gpg0-3, S2MPB02 at 0x59 on
+ * hsi2c_24, and the four rails with their voltages); they are the S10e's.
+ * Of the S2MPB02 only these four rails are described, so the others keep
+ * what S-Boot set.
+ */
+&usi_i2c_cam1 {
+	samsung,mode = <USI_MODE_I2C>;
+	status = "okay";
+};
+
+&hsi2c_1 {
+	clock-frequency = <400000>;
+	pinctrl-names = "default";
+	pinctrl-0 = <&hsi2c1_bus>;
+	status = "okay";
+
+	camera@2d {
+		compatible = "samsung,s5k3p9";
+		reg = <0x2d>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&cam_mclk3>;
+		clocks = <&cmu_top CLK_DOUT_CMU_CIS_CLK3>;
+		reset-gpios = <&gpg0 3 GPIO_ACTIVE_LOW>;
+		vddext-supply = <&cam_vdd_ext>;
+		avdd-supply = <&cam_ultrawide_avdd>;
+		dvdd-supply = <&cam_ultrawide_dvdd>;
+		dovdd-supply = <&cam_ultrawide_dovdd>;
+		orientation = <1>;
+
+		port {
+			ultrawide_out: endpoint {
+				remote-endpoint = <&csis1_in>;
+				data-lanes = <1 2 3 4>;
+				link-frequencies = /bits/ 64 <1027000000>;
+			};
+		};
+	};
+};
+
+&usi10 {
+	samsung,mode = <USI_MODE_I2C>;
+	status = "okay";
+};
+
+&hsi2c_24 {
+	clock-frequency = <400000>;
+	pinctrl-names = "default";
+	pinctrl-0 = <&hsi2c24_bus>;
+	status = "okay";
+
+	pmic@59 {
+		compatible = "samsung,s2mpb02";
+		reg = <0x59>;
+
+		regulators {
+			cam_vdd_ext: buck2 {
+				regulator-name = "VDD_EXT_1P3_PB02";
+				regulator-min-microvolt = <1300000>;
+				regulator-max-microvolt = <1300000>;
+			};
+
+			cam_ultrawide_dvdd: ldo4 {
+				regulator-name = "VDDD_1.05V_WIDESUB";
+				regulator-min-microvolt = <1050000>;
+				regulator-max-microvolt = <1050000>;
+			};
+
+			cam_ultrawide_dovdd: ldo8 {
+				regulator-name = "VDDIO_1.8V_WIDESUB";
+				regulator-min-microvolt = <1800000>;
+				regulator-max-microvolt = <1800000>;
+			};
+
+			cam_ultrawide_avdd: ldo15 {
+				regulator-name = "VDDA_2.8V_WIDESUB";
+				regulator-min-microvolt = <2800000>;
+				regulator-max-microvolt = <2800000>;
+			};
+		};
+	};
+};
+
+&csis1 {
+	status = "okay";
+
+	port {
+		csis1_in: endpoint {
+			remote-endpoint = <&ultrawide_out>;
+			data-lanes = <1 2 3 4>;
+		};
+	};
 };

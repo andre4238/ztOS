@@ -62,7 +62,10 @@ tele's (`..._SUB`: ldo3 1.05 V, ldo7 1.8 V, ldo11 2.8 V, ldo12 AF 2.8 V) and OIS
 1. **Done (2026-11-15):** `kernel/0001-…` = the S10e drivers + CMU_ISPPRE in our clock
    driver, built in by `ztos-rescue.config`; the kernel builds. Was: CMU_ISPPRE in our clock driver; the S10e drivers built in (`VIDEO_EXYNOS9820_CSIS`,
    `VIDEO_S5K3P9`, `REGULATOR_S2MPB02/03`).
-2. DT for the ultrawide path only (S5K3P9 on its bus, its rails, CSIS1/WDMA1, its PHY), every
+2. **Built (2026-11-15), not yet on the phone:** `exynos9820-camera.dtsi` (pd_isppre with the
+   TZPC SMC, cmu_isppre, CSIS0-2, the I2C controllers, from the S10e) + the ultrawide in
+   `exynos9820-beyond1lte.dts`, with the S10e's power-domain driver (TZPC save/restore SMC).
+   TODO: that driver as `kernel/0002-…`. Was: DT for the ultrawide path only (S5K3P9 on its bus, its rails, CSIS1/WDMA1, its PHY), every
    value checked against the S10's stock dtbo.
 3. On the phone: WDMA test pattern first (proves CSIS/WDMA without a sensor), then the
    S5K3P9 chip ID over I2C, then a RAW frame.
