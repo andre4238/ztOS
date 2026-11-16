@@ -104,6 +104,7 @@ enum action {
 	ACT_BT_MENU_CLOSE,
 	ACT_COLUMNS,
 	ACT_CORNERS,
+	ACT_GROUND,
 	ACT_STYLE,		/* arg: the shell's style, 0 Metro, 1 DotMatrix */
 	ACT_HAPTICS,
 	ACT_WIFI_RADIO,
@@ -217,6 +218,7 @@ static struct {
 	int wall_target;			/* 0 both, 1 Start, 2 lock screen */
 	int columns;
 	int round_tiles;			/* tile_corners: 0 square, 1 round */
+	int mica_ground;			/* start_ground: 0 black, 1 mica */
 	int style;				/* ztRetrofit's look: 0 Metro, 1 DotMatrix */
 	bool haptics;
 	char scale_text[16];
@@ -375,6 +377,8 @@ static void config_load(void) {
             app.media_vol = atoi(val) < 0 ? 0 : atoi(val) > 100 ? 100 : atoi(val);
         } else if (strcmp(key, "columns") == 0) {
 			app.columns = atoi(val);
+		} else if (strcmp(key, "start_ground") == 0) {
+			app.mica_ground = strcmp(val, "mica") == 0;
 		} else if (strcmp(key, "tile_corners") == 0) {
 			app.round_tiles = strcmp(val, "round") == 0;
 		} else if (strcmp(key, "style") == 0) {
@@ -556,7 +560,7 @@ static void auto_load(void) {
 
 static void config_save(void) {
 	static const int timeouts[] = { 30, 60, 180, 300, 0 };
-	enum { N_KEYS = 24 + N_HAPTIC_GROUPS };
+	enum { N_KEYS = 25 + N_HAPTIC_GROUPS };
 	struct { const char *key; char value[300]; bool written; } keys[N_KEYS] = {
 		{ .key = "accent" }, { .key = "columns" }, { .key = "haptics" },
 		{ .key = "brightness" }, { .key = "timeout" }, { .key = "demo_tiles" },
@@ -595,6 +599,8 @@ static void config_save(void) {
 	snprintf(keys[22 + N_HAPTIC_GROUPS].value, 32, "%s", dm_palette_names[app.palette]);
 	keys[23 + N_HAPTIC_GROUPS].key = "tile_corners";
 	snprintf(keys[23 + N_HAPTIC_GROUPS].value, 32, "%s", app.round_tiles ? "round" : "square");
+	keys[24 + N_HAPTIC_GROUPS].key = "start_ground";
+	snprintf(keys[24 + N_HAPTIC_GROUPS].value, 32, "%s", app.mica_ground ? "mica" : "black");
 	snprintf(keys[0].value, 32, "%s", ACCENTS[app.accent].name);
 	snprintf(keys[1].value, 32, "%d", app.columns);
 	snprintf(keys[2].value, 32, "%s", app.haptics ? "on" : "off");
@@ -1791,6 +1797,47 @@ static double draw_theme(cairo_t *cr) {
 			cairo_fill(cr);
 			zmc_text(cr, corners[k], FONT_REGULAR, 13, bx + 36, y + 9, 0);
 			zmc_add_hit(bx, y, btn_w, 36, ACT_CORNERS, k);
+		}
+		y += 60;
+
+		/* Start without a background photo: black, or a glow of the accent
+		 * (Windows 11's Mica) */
+		cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
+		zmc_text(cr, "Background without a photo", FONT_REGULAR, 13.5, MARGIN, y, 0);
+		y += 24;
+		static const char *const grounds[] = { "Black", "Accent glow" };
+		unsigned ac = ACCENTS[app.accent].color;
+		double ar = ((ac >> 16) & 255) / 255.0, ag = ((ac >> 8) & 255) / 255.0, ab = (ac & 255) / 255.0;
+		for (int k = 0; k < 2; k++) {
+			double btn_w = (zmc.width - 2 * MARGIN - gap) / 2.0;
+			double bx = MARGIN + k * (btn_w + gap);
+			if (app.mica_ground == k) {
+				zmc_set_rgb(cr, ac);
+			} else {
+				cairo_set_source_rgb(cr, 0.18, 0.18, 0.18);
+			}
+			cairo_rectangle(cr, bx, y, btn_w, 36);
+			cairo_fill(cr);
+			/* a swatch of it: black, or dark with the accent's glow */
+			double tx = bx + 10, ty = y + 10, ts = 16;
+			cairo_set_source_rgb(cr, 0, 0, 0);
+			cairo_rectangle(cr, tx, ty, ts, ts);
+			cairo_fill(cr);
+			if (k) {
+				cairo_pattern_t *glow = cairo_pattern_create_radial(tx + ts, ty, 0, tx + ts, ty, ts * 1.3);
+				cairo_pattern_add_color_stop_rgba(glow, 0, ar, ag, ab, 1);
+				cairo_pattern_add_color_stop_rgba(glow, 1, ar, ag, ab, 0.1);
+				cairo_set_source(cr, glow);
+				cairo_rectangle(cr, tx, ty, ts, ts);
+				cairo_fill(cr);
+				cairo_pattern_destroy(glow);
+			}
+			cairo_set_source_rgb(cr, 1, 1, 1);
+			cairo_set_line_width(cr, 1);
+			cairo_rectangle(cr, tx + 0.5, ty + 0.5, ts - 1, ts - 1);
+			cairo_stroke(cr);
+			zmc_text(cr, grounds[k], FONT_REGULAR, 13, bx + 36, y + 9, 0);
+			zmc_add_hit(bx, y, btn_w, 36, ACT_GROUND, k);
 		}
 		y += 60;
 	}
@@ -3241,6 +3288,10 @@ static void activate(int action, int arg) {
 		break;
 	case ACT_CORNERS:
 		app.round_tiles = arg;
+		config_save();
+		break;
+	case ACT_GROUND:
+		app.mica_ground = arg;
 		config_save();
 		break;
 	case ACT_STYLE:

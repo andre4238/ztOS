@@ -598,7 +598,8 @@ struct zt_server {
 	bool wall_full;
 	bool fluent;		/* the Windows 11 touch on Metro: round corners, Mica, sheen (fluent = on) */
 	bool wall_mica;
-	bool round_tiles;	/* tile_corners = round: Fluent's round corners on tiles */		/* no photo chosen: Start stands on a Mica ground made from the accent */
+	bool round_tiles;
+	bool mica_ground;	/* start_ground = mica: no photo gives Mica from the accent, not black */	/* tile_corners = round: Fluent's round corners on tiles */		/* no photo chosen: Start stands on a Mica ground made from the accent */
 	int tile_transparency;
 	cairo_surface_t *lock_wall;
 	bool locked;
@@ -3086,6 +3087,7 @@ static void load_config(struct zt_server *server) {
 	server->wall_full = false;
 	server->fluent = true;
 	server->round_tiles = false;
+	server->mica_ground = false;
 	server->tile_transparency = 35;
 	server->island_on = false;
 	server->island_calibrate = false;
@@ -3142,6 +3144,8 @@ static void load_config(struct zt_server *server) {
 		} else if (strcmp(key, "island_r") == 0) {
 			float r = (float)atof(value);
 			server->island_r = r < 4.0f ? 4.0f : r > 40.0f ? 40.0f : r;
+		} else if (strcmp(key, "start_ground") == 0) {
+			server->mica_ground = strcmp(value, "mica") == 0;
 		} else if (strcmp(key, "tile_corners") == 0) {
 			server->round_tiles = strcmp(value, "round") == 0;
 		} else if (strcmp(key, "fluent") == 0) {
@@ -3676,7 +3680,8 @@ static cairo_surface_t *image_cover(const char *path, int pw, int ph) {
 	return out;
 }
 
-/* Start's ground when no photo is chosen and Fluent is on: Windows 11's Mica,
+/* Start's ground when no photo is chosen and start_ground = mica (Settings >
+ * Theme; black otherwise): Windows 11's Mica,
  * made from the accent – a near-black ground with a few wide, soft blooms of
  * the accent (and of a lighter and a deeper shade of it), so the tiles, a
  * little see-through over it, read as acrylic. Made once per accent; a touch
@@ -3767,7 +3772,7 @@ static void walls_load(struct zt_server *server) {
 	}
 	server->wall_h = 0;
 	server->wall_mica = false;
-	if (!server->start_wall_path[0] && server->fluent) {
+	if (!server->start_wall_path[0] && server->fluent && server->mica_ground) {
 		wall_mica(server);
 	} else if (server->start_wall_path[0]) {
 		double h = server->height * WALL_TALL;
