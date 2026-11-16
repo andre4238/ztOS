@@ -597,7 +597,8 @@ struct zt_server {
 	 * colour, tiles of their own colour stay solid */
 	bool wall_full;
 	bool fluent;		/* the Windows 11 touch on Metro: round corners, Mica, sheen (fluent = on) */
-	bool wall_mica;		/* no photo chosen: Start stands on a Mica ground made from the accent */
+	bool wall_mica;
+	bool round_tiles;	/* tile_corners = round: Fluent's round corners on tiles */		/* no photo chosen: Start stands on a Mica ground made from the accent */
 	int tile_transparency;
 	cairo_surface_t *lock_wall;
 	bool locked;
@@ -1791,12 +1792,13 @@ static void round_rect(cairo_t *cr, double x, double y, double w, double h, doub
 }
 
 /* Fluent's corners: tiles (and what is drawn like them) a little round, the
- * small ones less; 0 with fluent = off, Metro's square corners */
-#define FLUENT_TILE_R	0.0	/* tiles stay square, as in Metro */
-#define FLUENT_SMALL_R	0.0
-#define FLUENT_CTRL_R	0.0
+ * small ones less, when tile_corners = round (Settings > Theme); square, as
+ * in Metro, otherwise (the default) and with fluent = off */
+#define FLUENT_TILE_R	7.0
+#define FLUENT_SMALL_R	5.0
+#define FLUENT_CTRL_R	4.0
 static double fluent_r(const struct zt_server *server, double r) {
-	return server->fluent ? r : 0;
+	return server->fluent && server->round_tiles ? r : 0;
 }
 
 /* Text of `size` points with its top left at (x, y); centred in a box of
@@ -3083,6 +3085,7 @@ static void load_config(struct zt_server *server) {
 		"%s", "/usr/local/share/backgrounds/ztos/Lumia Cyan lock screens/Wallpaper_01.jpg");
 	server->wall_full = false;
 	server->fluent = true;
+	server->round_tiles = false;
 	server->tile_transparency = 35;
 	server->island_on = false;
 	server->island_calibrate = false;
@@ -3139,6 +3142,8 @@ static void load_config(struct zt_server *server) {
 		} else if (strcmp(key, "island_r") == 0) {
 			float r = (float)atof(value);
 			server->island_r = r < 4.0f ? 4.0f : r > 40.0f ? 40.0f : r;
+		} else if (strcmp(key, "tile_corners") == 0) {
+			server->round_tiles = strcmp(value, "round") == 0;
 		} else if (strcmp(key, "fluent") == 0) {
 			server->fluent = strcmp(value, "off") != 0 && strcmp(value, "0") != 0;
 		} else if (strcmp(key, "start_background") == 0) {
@@ -3881,7 +3886,7 @@ static void tile_paint_face(struct zt_server *server, cairo_t *cr, const struct 
 		 * middle, and a hairline round the edge, brighter at the top, as
 		 * Windows 11's cards have (the corners themselves are cut by the
 		 * shader, quad_radius) */
-		double r = t->size == TILE_SMALL ? FLUENT_SMALL_R : FLUENT_TILE_R;
+		double r = fluent_r(server, t->size == TILE_SMALL ? FLUENT_SMALL_R : FLUENT_TILE_R);
 		cairo_pattern_t *sheen = cairo_pattern_create_linear(0, 0, 0, t->h);
 		cairo_pattern_add_color_stop_rgba(sheen, 0, 1, 1, 1, 0.10);
 		cairo_pattern_add_color_stop_rgba(sheen, 0.55, 1, 1, 1, 0);
@@ -4757,7 +4762,7 @@ static void draw_item(struct zt_server *server, int i) {
 			cairo_pattern_add_color_stop_rgba(sheen, 0, 1, 1, 1, 0.14);
 			cairo_pattern_add_color_stop_rgba(sheen, 0.6, 1, 1, 1, 0);
 			cairo_set_source(cr, sheen);
-			round_rect(cr, 0, 0, LIST_ICON, LIST_ICON, FLUENT_CTRL_R);
+			round_rect(cr, 0, 0, LIST_ICON, LIST_ICON, fluent_r(server, FLUENT_CTRL_R));
 			cairo_fill(cr);
 			cairo_pattern_destroy(sheen);
 		}
@@ -6757,7 +6762,7 @@ static void shade_tile_draw(struct zt_server *server, cairo_t *cr, int i, double
 		/* a hairline, lighter on top, as on the tiles */
 		cairo_set_source_rgba(cr, 1, 1, 1, on ? 0.20 : 0.08);
 		cairo_set_line_width(cr, 1.0);
-		round_rect(cr, 0.5, 0.5, w - 1, h - 1, FLUENT_CTRL_R - 0.5);
+		round_rect(cr, 0.5, 0.5, w - 1, h - 1, fluent_r(server, FLUENT_CTRL_R) - 0.5);
 		cairo_stroke(cr);
 	}
 	/* glyph in the top left corner, label along the bottom left */
