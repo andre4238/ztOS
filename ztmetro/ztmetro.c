@@ -7180,9 +7180,13 @@ static void draw_splash(struct zt_server *server) {
 		free(buf);
 		dm_screen_finish(&field);
 	} else {
-		/* Plain ztOS logo: thin text, white on black */
+		/* the A-SYSTEMS OS mark: the name in thin type, OS under it,
+		 * white on black (as splash/ztos-splash draws it before the shell) */
 		cairo_set_source_rgb(cr, 1.0, 1.0, 1.0);
-		draw_text(cr, "ztOS", FONT_LIGHT, 56.0, 0, 0, server->width, server->height, true);
+		double mid = server->height / 2.0;
+		draw_text(cr, "A-SYSTEMS", FONT_LIGHT, 44.0, 0, mid - 62, server->width, 62, true);
+		cairo_set_source_rgb(cr, 0.75, 0.75, 0.75);
+		draw_text(cr, "OS", FONT_SEMILIGHT, 26.0, 0, mid + 2, server->width, 36, true);
 	}
 
 	zt_buffer_show(server, &server->splash_layer, buffer, cr, server->width, server->height);

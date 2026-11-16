@@ -73,7 +73,7 @@ static const struct { enum kind kind; const char *id, *title; } extras[] = {
 	{ K_USER, "pipewire.service", "Audio (PipeWire)" },
 	{ K_USER, "wireplumber.service", "Audio policy (WirePlumber)" },
 	{ K_USER, "pipewire-pulse.service", "Audio for PulseAudio programs" },
-	{ K_SESSION, "ztmetro", "ztMETRO shell" },
+	{ K_SESSION, "ztmetro", "ASMS shell" },
 	{ K_SESSION, "ztnotifyd", "Notifications" },
 	{ K_SESSION, "ztos-bt-state", "Bluetooth status" },
 };

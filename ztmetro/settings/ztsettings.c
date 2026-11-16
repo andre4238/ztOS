@@ -178,7 +178,7 @@ static const struct { const char *key, *title, *about; } HAPTIC_GROUPS[] = {
 	{ "haptic_nav", "Navigation bar", "Back, Start and search; the app switcher" },
 	{ "haptic_tiles", "Tiles and lists", "Opening, moving, resizing and pinning" },
 	{ "haptic_slide", "Sliders and unlocking", "A notch every tenth of a slider, and the lock screen letting go" },
-	{ "haptic_apps", "Inside apps", "Rows, switches and pickers in ztMETRO's own apps" },
+	{ "haptic_apps", "Inside apps", "Rows, switches and pickers in ASMS's own apps" },
 	{ "haptic_keys", "Keyboard", "A short, light tick for every key" },
 };
 #define N_HAPTIC_GROUPS 6
@@ -940,7 +940,7 @@ static double draw_main(cairo_t *cr) {
 
 	y = zmc_entry(cr, y, "date + region", "date, time zone and regional formats", ACT_OPEN_PAGE, PAGE_DATE);
 
-	y = zmc_entry(cr, y, "about", "Samsung Galaxy S9, ztOS Mobile", ACT_OPEN_PAGE, PAGE_ABOUT);
+	y = zmc_entry(cr, y, "about", "Samsung Galaxy S9, A-SYSTEMS OS", ACT_OPEN_PAGE, PAGE_ABOUT);
 
 	return y + 20;
 }
@@ -2939,7 +2939,7 @@ static double draw_about(cairo_t *cr) {
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
 	zmc_text(cr, "Operating System", FONT_REGULAR, 13, MARGIN, y, 0);
 	cairo_set_source_rgb(cr, 1, 1, 1);
-	y += zmc_text(cr, "ztOS Mobile (Arch Linux ARM)", FONT_SEMILIGHT, 19, MARGIN, y + 18, zmc.width - 2 * MARGIN) + 30;
+	y += zmc_text(cr, "A-SYSTEMS OS (Arch Linux ARM)", FONT_SEMILIGHT, 19, MARGIN, y + 18, zmc.width - 2 * MARGIN) + 30;
 
 	struct utsname uts;
 	if (uname(&uts) == 0) {
@@ -2953,7 +2953,7 @@ static double draw_about(cairo_t *cr) {
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
 	zmc_text(cr, "Shell", FONT_REGULAR, 13, MARGIN, y, 0);
 	cairo_set_source_rgb(cr, 1, 1, 1);
-	y += zmc_text(cr, "ztMETRO (Wayland / wlroots 0.20)", FONT_SEMILIGHT, 19, MARGIN, y + 18, zmc.width - 2 * MARGIN) + 30;
+	y += zmc_text(cr, "ASMS – A-SYSTEMS Metro Shell (Wayland / wlroots 0.20)", FONT_SEMILIGHT, 19, MARGIN, y + 18, zmc.width - 2 * MARGIN) + 30;
 
 	struct sysinfo si;
 	if (sysinfo(&si) == 0) {
@@ -3042,7 +3042,7 @@ static double render_page_content(cairo_t *cr, int p) {
 	case PAGE_ACCENTS: return draw_accents(cr);
 	case PAGE_WALLS: return draw_wallpapers(cr);
 	case PAGE_NAVIGATION: {
-		static const char *names[] = { "ztMETRO logo", "ZRN text", "Start square", "Four panes", "Circle" };
+		static const char *names[] = { "ASMS logo", "ZRN text", "Start square", "Four panes", "Circle" };
 		double y = zmc_header(cr, "navigation bar");
 		double gap = 12, w = (zmc.width - 2 * MARGIN - gap) / 2, h = 88;
 		for (int i = 0; i < 5; i++) {

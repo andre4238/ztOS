@@ -50,24 +50,30 @@ int main(int argc, char **argv) {
 	cairo_set_source_rgb(cr, 0, 0, 0);
 	cairo_paint(cr);
 
-	/* Plain ztOS logo: matching ztmetro draw_splash identically */
+	/* the A-SYSTEMS OS mark, as the shell's draw_splash has it: the name in
+	 * thin type, OS under it */
 	cairo_scale(cr, 4.0, 4.0);
-	cairo_set_source_rgb(cr, 1.0, 1.0, 1.0);
-	PangoLayout *layout = pango_cairo_create_layout(cr);
-	PangoFontDescription *desc = pango_font_description_from_string("Segoe WP Light, Selawik Light, Open Sans Light, sans-serif");
-	pango_font_description_set_absolute_size(desc, 56.0 * PANGO_SCALE);
-	pango_layout_set_font_description(layout, desc);
-	pango_layout_set_text(layout, "ztOS", -1);
-	pango_layout_set_width(layout, (int)(360.0 * PANGO_SCALE));
-	pango_layout_set_alignment(layout, PANGO_ALIGN_CENTER);
-	int tw, th;
-	pango_layout_get_pixel_size(layout, &tw, &th);
-	double y = (740.0 - th) / 2.0;
-	cairo_move_to(cr, 0, y);
-	pango_cairo_show_layout(cr, layout);
-
-	pango_font_description_free(desc);
-	g_object_unref(layout);
+	static const struct { const char *text, *font; double size, grey, top, box; } lines[] = {
+		{ "A-SYSTEMS", "Segoe WP Light, Selawik Light, Open Sans Light, sans-serif", 44.0, 1.0, -62, 62 },
+		{ "OS", "Segoe WP Semilight, Selawik Semilight, Open Sans, sans-serif", 26.0, 0.75, 2, 36 },
+	};
+	for (int i = 0; i < 2; i++) {
+		cairo_set_source_rgb(cr, lines[i].grey, lines[i].grey, lines[i].grey);
+		PangoLayout *layout = pango_cairo_create_layout(cr);
+		PangoFontDescription *desc = pango_font_description_from_string(lines[i].font);
+		pango_font_description_set_absolute_size(desc, lines[i].size * PANGO_SCALE);
+		pango_layout_set_font_description(layout, desc);
+		pango_layout_set_text(layout, lines[i].text, -1);
+		pango_layout_set_width(layout, (int)(360.0 * PANGO_SCALE));
+		pango_layout_set_alignment(layout, PANGO_ALIGN_CENTER);
+		int tw, th;
+		pango_layout_get_pixel_size(layout, &tw, &th);
+		double y = 740.0 / 2.0 + lines[i].top + (lines[i].box - th) / 2.0;
+		cairo_move_to(cr, 0, y);
+		pango_cairo_show_layout(cr, layout);
+		pango_font_description_free(desc);
+		g_object_unref(layout);
+	}
 	cairo_destroy(cr);
 
 	cairo_surface_flush(surf);

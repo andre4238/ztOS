@@ -138,7 +138,7 @@ static double draw_logs(cairo_t *cr) {
 	double y = zmc_pivot_next(cr, "logs", "devtest", ACT_OPEN, PAGE_HUB);
 	y = zmc_entry(cr, y, "journal", "systemd's log as it is written", ACT_OPEN, PAGE_JOURNAL);
 	y = zmc_entry(cr, y, "kernel log", "the kernel's messages as they come", ACT_OPEN, PAGE_KERNEL);
-	y = zmc_entry(cr, y, "shell log", "ztMETRO's own log", ACT_OPEN, PAGE_SHELL);
+	y = zmc_entry(cr, y, "shell log", "ASMS's own log", ACT_OPEN, PAGE_SHELL);
 	return y + 20;
 }
 
