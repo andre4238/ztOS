@@ -84,6 +84,7 @@
 #include <wlr/render/gles2.h>
 #include <wlr/render/swapchain.h>
 #include <wlr/render/wlr_renderer.h>
+#include <wlr/render/wlr_texture.h>
 #include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_data_device.h>
 #include <wlr/types/wlr_fractional_scale_v1.h>
@@ -504,6 +505,9 @@ struct zt_output {
 	struct wlr_output *wlr_output;
 	struct wl_listener frame, request_state, destroy;
 	struct wlr_buffer *last_submitted; /* identity only; never dereferenced */
+	/* when the last frame was drawn, for the 60 Hz pace */
+	uint32_t last_render_ms;
+	struct wl_event_source *pace_timer;
 };
 
 struct zt_server {
@@ -1022,6 +1026,12 @@ static uint32_t menu_ms(struct zt_server *server, uint32_t ms) {
 }
 
 static void perf_tell(const char *command);
+static void frame_shown(struct zt_server *server, struct wlr_buffer *buffer);
+static void qrec_own_texture(GLuint tex);
+static void qrec_uploaded_texture(GLuint tex);
+static void qrec_add(GLuint tex, GLenum target, const float mvp[16], float alpha, uint8_t flags,
+		const float uv[4], const float tint[3], float reveal, float dpitch, int W, int H);
+static void qrec_forget(GLsizei n, const GLuint *ids);
 
 /* The CPU's floor raised until a motion ends (zrnperfd's "motion MS"): with
  * schedutil starting from its idle clocks, the first frames of an animation
@@ -1382,10 +1392,12 @@ static void renderer_init(struct zt_server *server) {
 	}
 	static const unsigned char white[4] = { 255, 255, 255, 255 };
 	glGenTextures(1, &server->white_tex);
+	qrec_own_texture(server->white_tex);
 	glBindTexture(GL_TEXTURE_2D, server->white_tex);
 	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, white);
 	static const unsigned char black[4] = { 0, 0, 0, 255 };
 	glGenTextures(1, &server->black_tex);
+	qrec_own_texture(server->black_tex);
 	glBindTexture(GL_TEXTURE_2D, server->black_tex);
 	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, black);
 	glBindTexture(GL_TEXTURE_2D, 0);
@@ -1445,6 +1457,14 @@ static void quad(struct zt_server *server, GLenum target, GLuint tex, const floa
 		mat_mul(mvp, q, mvp);
 	} else {
 		mat_mul(mvp, server->projection, model);
+	}
+	{
+		float uv[4] = { u_max, v_max, server->uv_off[0], server->uv_off[1] };
+		struct wlr_output *wo = server->output ? server->output->wlr_output : NULL;
+		if (wo) {
+			qrec_add(tex, target, mvp, alpha, (swap_rb ? 1 : 0) | (opaque ? 2 : 0), uv, server->tint,
+				server->quad_reveal, server->quad_dpitch, wo->width, wo->height);
+		}
 	}
 	glUseProgram(program);
 	glUniformMatrix4fv(glGetUniformLocation(program, "mvp"), 1, GL_FALSE, mvp);
@@ -1531,6 +1551,8 @@ static void zt_buffer_show(struct zt_server *server, struct zt_layer *layer,
 			glGenTextures(1, &layer->tex);
 			created = true;
 		}
+		qrec_own_texture(layer->tex);
+		qrec_uploaded_texture(layer->tex);
 		glBindTexture(GL_TEXTURE_2D, layer->tex);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
@@ -1559,6 +1581,7 @@ static void zt_buffer_show(struct zt_server *server, struct zt_layer *layer,
 		GLenum error = glGetError();
 		if (error != GL_NO_ERROR) {
 			wlr_log(WLR_ERROR, "layer upload failed (GL 0x%x); releasing texture", error);
+			qrec_forget(1, &layer->tex);
 			glDeleteTextures(1, &layer->tex);
 			layer->tex = 0;
 			layer->alloc_tw = layer->alloc_th = 0;
@@ -4823,6 +4846,7 @@ static void load_apps(struct zt_server *server) {
 	if (gl_begin(server)) {
 		for (int i = 0; i < server->n_items; i++) {
 			if (server->items[i].layer.tex) {
+				qrec_forget(1, &server->items[i].layer.tex);
 				glDeleteTextures(1, &server->items[i].layer.tex);
 			}
 		}
@@ -4952,6 +4976,7 @@ static bool list_prepare(struct zt_server *server) {
 		}
 	}
 	if (n_drop && gl_begin(server)) {
+		qrec_forget(n_drop, drop);
 		glDeleteTextures(n_drop, drop);
 		gl_end(server);
 	}
@@ -6710,6 +6735,7 @@ static void notes_build(struct zt_server *server) {
 		}
 	}
 	if (n_drop && gl_begin(server)) {
+		qrec_forget(n_drop, drop);
 		glDeleteTextures(n_drop, drop);
 		gl_end(server);
 	}
@@ -9809,6 +9835,7 @@ static void tile_unpin(struct zt_server *server, int index) {
 	tiles_rest(server);
 	GLuint tex = server->tiles[index].layer.tex;
 	if (tex && gl_begin(server)) {
+		qrec_forget(1, &tex);
 		glDeleteTextures(1, &tex);
 		gl_end(server);
 	}
@@ -10628,6 +10655,7 @@ static void screen_set(struct zt_server *server, bool on) {
 	}
 	wlr_output_state_finish(&state);
 	server->screen_on = on;
+	frame_shown(server, NULL);	/* what the panel holds now is not known: the next frame goes whole */
 	if (demoloop_active()) {
 		char path[256];
 		FILE *state = fopen(runtime_file(path, sizeof(path), "ztos-demoloop.screen"), "w");
@@ -13415,6 +13443,209 @@ static double ftrace_clock(void) {
 	return ts.tv_sec * 1e3 + ts.tv_nsec / 1e6;
 }
 
+
+/* ---- only what changed goes to the panel ------------------------------------------------
+ *
+ * The S10's panel runs on simpledrm: every committed frame is copied by the
+ * CPU from the buffer into the panel's memory, 1440 x 3040 x 4 bytes, and that
+ * copy (about 25 ms) held Start to 30 frames a second however quickly the
+ * frame was drawn. simpledrm copies only the frame's damage clips, though
+ * (measured: a small damage, a frame every 4.5 to 7 ms). So every quad drawn
+ * is written down (qrec): its texture, where it lands, alpha, tint, clip. A
+ * quad drawn exactly as in the frame before, from a texture not uploaded
+ * since, has not changed; any other quad – moved, faded, new, gone, or
+ * showing an app (whose pixels the client changes) – damages where it was
+ * and where it is. Moves of most of the screen still copy it all. */
+#define QREC_MAX	512
+#define QREC_FULL	0.70	/* more than this share of the screen: the whole frame */
+
+struct qrec {
+	GLuint tex;
+	GLenum target;
+	float m[16];
+	float alpha, uv[4], tint[3], reveal, dpitch;
+	uint8_t flags;		/* 1 swap_rb, 2 opaque */
+	GLint scissor[5];	/* on, x, y, w, h */
+	int x0, y0, x1, y1;	/* where it lands, buffer pixels */
+};
+static struct qrec qrec_cur[QREC_MAX], qrec_prev[QREC_MAX];
+static int qrec_ncur, qrec_nprev = -1;	/* -1: the panel's pixels are not known */
+static bool qrec_on, qrec_overflow;
+static GLuint qrec_uploaded[256];
+static int qrec_nup;
+static bool qrec_up_overflow;
+static uint8_t qrec_own[8192];		/* our textures (ids below 65536): the shell's own pixels */
+
+static void qrec_own_texture(GLuint tex) {
+	if (tex < 65536) qrec_own[tex >> 3] |= (uint8_t)(1 << (tex & 7));
+}
+
+/* textures given back: their ids may come again, for an app's pixels */
+static void qrec_forget(GLsizei n, const GLuint *ids) {
+	for (GLsizei i = 0; i < n; i++) {
+		if (ids[i] < 65536) qrec_own[ids[i] >> 3] &= (uint8_t)~(1 << (ids[i] & 7));
+		qrec_uploaded_texture(ids[i]);
+	}
+}
+
+/* a texture's pixels replaced: what shows it has changed */
+static void qrec_uploaded_texture(GLuint tex) {
+	for (int i = 0; i < qrec_nup; i++) {
+		if (qrec_uploaded[i] == tex) return;
+	}
+	if (qrec_nup < (int)(sizeof(qrec_uploaded) / sizeof(qrec_uploaded[0]))) {
+		qrec_uploaded[qrec_nup++] = tex;
+	} else {
+		qrec_up_overflow = true;
+	}
+}
+
+static void qrec_add(GLuint tex, GLenum target, const float mvp[16], float alpha, uint8_t flags,
+		const float uv[4], const float tint[3], float reveal, float dpitch, int W, int H) {
+	if (!qrec_on) return;
+	if (qrec_ncur >= QREC_MAX) {
+		qrec_overflow = true;
+		return;
+	}
+	struct qrec *r = &qrec_cur[qrec_ncur++];
+	r->tex = tex;
+	r->target = target;
+	memcpy(r->m, mvp, sizeof(r->m));
+	r->alpha = alpha;
+	memcpy(r->uv, uv, sizeof(r->uv));
+	memcpy(r->tint, tint, sizeof(r->tint));
+	r->reveal = reveal;
+	r->dpitch = dpitch;
+	r->flags = flags;
+	r->scissor[0] = glIsEnabled(GL_SCISSOR_TEST);
+	if (r->scissor[0]) {
+		glGetIntegerv(GL_SCISSOR_BOX, &r->scissor[1]);
+	} else {
+		r->scissor[1] = r->scissor[2] = r->scissor[3] = r->scissor[4] = 0;
+	}
+	/* the unit square through the matrix (with its perspective) to pixels;
+	 * GL's row 0 is the buffer's top row here (see the scissors) */
+	float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
+	bool behind = false;
+	for (int k = 0; k < 4; k++) {
+		float cx = (float)(k & 1), cy = (float)(k >> 1);
+		float x = mvp[0] * cx + mvp[4] * cy + mvp[12];
+		float y = mvp[1] * cx + mvp[5] * cy + mvp[13];
+		float w = mvp[3] * cx + mvp[7] * cy + mvp[15];
+		if (w <= 1e-4f) { behind = true; break; }
+		float px = (x / w + 1.0f) * 0.5f * W, py = (y / w + 1.0f) * 0.5f * H;
+		x0 = fminf(x0, px); x1 = fmaxf(x1, px);
+		y0 = fminf(y0, py); y1 = fmaxf(y1, py);
+	}
+	if (behind) {
+		r->x0 = 0; r->y0 = 0; r->x1 = W; r->y1 = H;
+	} else {
+		/* two pixels more each way: linear filtering reaches past the edge */
+		r->x0 = (int)floorf(x0) - 2; r->y0 = (int)floorf(y0) - 2;
+		r->x1 = (int)ceilf(x1) + 2; r->y1 = (int)ceilf(y1) + 2;
+	}
+	if (r->scissor[0]) {
+		int sx0 = r->scissor[1], sy0 = r->scissor[2];
+		int sx1 = sx0 + r->scissor[3], sy1 = sy0 + r->scissor[4];
+		r->x0 = r->x0 > sx0 ? r->x0 : sx0; r->y0 = r->y0 > sy0 ? r->y0 : sy0;
+		r->x1 = r->x1 < sx1 ? r->x1 : sx1; r->y1 = r->y1 < sy1 ? r->y1 : sy1;
+	}
+	r->x0 = r->x0 < 0 ? 0 : r->x0; r->y0 = r->y0 < 0 ? 0 : r->y0;
+	r->x1 = r->x1 > W ? W : r->x1; r->y1 = r->y1 > H ? H : r->y1;
+}
+
+static bool qrec_same(const struct qrec *a, const struct qrec *b) {
+	if (a->tex != b->tex || a->target != b->target || a->flags != b->flags ||
+			memcmp(a->scissor, b->scissor, sizeof(a->scissor)) != 0) {
+		return false;
+	}
+	for (int i = 0; i < 16; i++) {
+		if (fabsf(a->m[i] - b->m[i]) > 1e-5f) return false;
+	}
+	for (int i = 0; i < 4; i++) {
+		if (fabsf(a->uv[i] - b->uv[i]) > 1e-6f) return false;
+	}
+	for (int i = 0; i < 3; i++) {
+		if (fabsf(a->tint[i] - b->tint[i]) > 1e-4f) return false;
+	}
+	return fabsf(a->alpha - b->alpha) <= 1e-4f && fabsf(a->reveal - b->reveal) <= 1e-4f &&
+		fabsf(a->dpitch - b->dpitch) <= 1e-4f;
+}
+
+static bool qrec_fixed(const struct qrec *r) {
+	bool own = r->tex < 65536 && (qrec_own[r->tex >> 3] & (1 << (r->tex & 7)));
+	if (!own) return false;		/* an app's pixels: they change without us */
+	for (int i = 0; i < qrec_nup; i++) {
+		if (qrec_uploaded[i] == r->tex) return false;
+	}
+	return true;
+}
+
+static void qrec_box(pixman_region32_t *dmg, const struct qrec *r) {
+	if (r->x1 > r->x0 && r->y1 > r->y0) {
+		pixman_region32_union_rect(dmg, dmg, r->x0, r->y0, r->x1 - r->x0, r->y1 - r->y0);
+	}
+}
+
+/* The frame's damage against the frame before. False: the frame goes whole. */
+static bool qrec_damage(int W, int H, pixman_region32_t *dmg) {
+	if (getenv("ZTMETRO_FULL_FRAMES") || qrec_nprev < 0 || qrec_overflow || qrec_up_overflow) {
+		return false;
+	}
+	for (int i = 0; i < qrec_ncur; i++) {
+		const struct qrec *c = &qrec_cur[i];
+		bool kept = false;
+		if (qrec_fixed(c)) {
+			for (int j = 0; j < qrec_nprev && !kept; j++) {
+				kept = qrec_same(c, &qrec_prev[j]);
+			}
+		}
+		if (!kept) qrec_box(dmg, c);
+	}
+	for (int j = 0; j < qrec_nprev; j++) {
+		const struct qrec *p = &qrec_prev[j];
+		bool kept = false;
+		for (int i = 0; i < qrec_ncur && !kept; i++) {
+			kept = qrec_same(p, &qrec_cur[i]) && qrec_fixed(p);
+		}
+		if (!kept) qrec_box(dmg, p);
+	}
+	pixman_box32_t *e = pixman_region32_extents(dmg);
+	long area = 0;
+	int n = 0;
+	pixman_box32_t *boxes = pixman_region32_rectangles(dmg, &n);
+	for (int i = 0; i < n; i++) {
+		area += (long)(boxes[i].x2 - boxes[i].x1) * (boxes[i].y2 - boxes[i].y1);
+	}
+	(void)e;
+	if (area > (long)(QREC_FULL * W * H)) {
+		return false;
+	}
+	if (!pixman_region32_not_empty(dmg)) {
+		pixman_region32_union_rect(dmg, dmg, 0, 0, 8, 8);	/* nothing changed: a token block */
+	}
+	return true;
+}
+
+/* after the commit: this frame is what the panel shows (or, failed, nothing known) */
+static void qrec_done(bool committed) {
+	if (committed && !qrec_overflow) {
+		memcpy(qrec_prev, qrec_cur, sizeof(struct qrec) * qrec_ncur);
+		qrec_nprev = qrec_ncur;
+	} else {
+		qrec_nprev = -1;
+	}
+	qrec_ncur = 0;
+	qrec_overflow = false;
+	qrec_nup = 0;
+	qrec_up_overflow = false;
+}
+
+static void frame_shown(struct zt_server *server, struct wlr_buffer *buffer) {
+	(void)server;
+	if (!buffer) qrec_nprev = -1;	/* the panel's pixels are not known: the next frame goes whole */
+}
+
 static void render_frame(struct zt_server *server) {
 	struct wlr_output *output = server->output->wlr_output;
 	uint32_t now = now_ms();
@@ -13492,6 +13723,9 @@ static void render_frame(struct zt_server *server) {
 	glClearColor(0, 0, 0, 1);
 	glClear(GL_COLOR_BUFFER_BIT);
 	frame_tint(server);
+	qrec_ncur = 0;
+	qrec_overflow = false;
+	qrec_on = true;		/* every quad of this frame written down (qrec) */
 
 	struct zt_toplevel *app = server->shown ? server->shown : server->leaving;
 	struct app_draw draw = { .server = server, .x = 0, .y = STATUS_H - server->app_lift, .scale = 1.0f,
@@ -14063,6 +14297,11 @@ static void render_frame(struct zt_server *server) {
 			}
 		}
 	}
+	/* what changed against the frame on the panel (qrec_damage) */
+	qrec_on = false;
+	pixman_region32_t changed;
+	pixman_region32_init(&changed);
+	bool damaged = qrec_damage(buffer->width, buffer->height, &changed);
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
 	struct timespec t1, t2, t3;
 	clock_gettime(CLOCK_MONOTONIC, &t1);
@@ -14079,6 +14318,7 @@ static void render_frame(struct zt_server *server) {
 	clock_gettime(CLOCK_MONOTONIC, &t2);
 	if (frame_error != GL_NO_ERROR) {
 		wlr_log(WLR_ERROR, "skipping failed output frame (GL 0x%x)", frame_error);
+		pixman_region32_fini(&changed);
 		wlr_buffer_unlock(buffer);
 		wlr_output_state_finish(&state);
 		render_retry_later(server);
@@ -14086,10 +14326,17 @@ static void render_frame(struct zt_server *server) {
 	}
 
 	wlr_output_state_set_buffer(&state, buffer);
-	wlr_buffer_unlock(buffer);
+	if (damaged && !plane && !server->plane_shown) {
+		wlr_output_state_set_damage(&state, &changed);
+	}
+	pixman_region32_fini(&changed);
 	if (!wlr_output_commit_state(output, &state)) {
 		wlr_log(WLR_ERROR, "output commit failed");
+		qrec_done(false);	/* the panel may show anything: the next frame goes whole */
+		wlr_buffer_unlock(buffer);
 	} else {
+		qrec_done(true);
+		wlr_buffer_unlock(buffer);
 		bool was = server->plane_shown;
 		server->plane_shown = plane;
 		if (plane != was) {
@@ -14186,9 +14433,27 @@ static void render_frame(struct zt_server *server) {
 	}
 }
 
+/* 60 frames a second at most: with only the changed blocks copied, simpledrm
+ * (which has no vblank) would hand back a frame every few milliseconds */
+static int pace_fire(void *data) {
+	struct zt_output *output = data;
+	wlr_output_schedule_frame(output->wlr_output);
+	return 0;
+}
+
 static void output_frame(struct wl_listener *listener, void *data) {
 	struct zt_output *output = wl_container_of(listener, output, frame);
 	struct zt_server *server = output->server;
+	uint32_t since = now_ms() - output->last_render_ms;
+	if (output->last_render_ms && since < 15) {
+		if (!output->pace_timer) {
+			output->pace_timer = wl_event_loop_add_timer(server->loop, pace_fire, output);
+		}
+		if (output->pace_timer) {
+			wl_event_source_timer_update(output->pace_timer, 16 - since);
+			return;
+		}
+	}
 	/* An app that is moving (a scroll, its own animation) gets a frame, and
 	 * its frame callback, on every vblank, not only when its commit came in
 	 * before this one: a commit just after it waited for the one after, and
@@ -14196,6 +14461,7 @@ static void output_frame(struct wl_listener *listener, void *data) {
 	bool app_live = (int32_t)(server->app_live_until - now_ms()) > 0;
 	/* nothing damaged and nothing moving: no frame, and no further wake-ups */
 	if (server->dirty || server->moving || app_live || loading_active(server) || animating(server, NULL)) {
+		output->last_render_ms = now_ms();
 		render_frame(server);
 	}
 	if (app_live) {
@@ -14421,13 +14687,16 @@ static int reload(int signal_number, void *data) {
 	if (gl_begin(server)) {
 		for (int i = 0; i < n; i++) {
 			if (server->tiles[i].layer.tex) {
+				qrec_forget(1, &server->tiles[i].layer.tex);
 				glDeleteTextures(1, &server->tiles[i].layer.tex);
 			}
 			if (server->tiles[i].back_layer.tex) {
+				qrec_forget(1, &server->tiles[i].back_layer.tex);
 				glDeleteTextures(1, &server->tiles[i].back_layer.tex);
 			}
 			for (int k = 0; k < 3; k++) {
 				if (server->tiles[i].sweep_layer[k].tex) {
+					qrec_forget(1, &server->tiles[i].sweep_layer[k].tex);
 					glDeleteTextures(1, &server->tiles[i].sweep_layer[k].tex);
 				}
 			}
