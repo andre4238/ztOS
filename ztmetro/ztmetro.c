@@ -545,6 +545,7 @@ struct zt_server {
 	float uv_off[2];		/* where in its texture the next quad starts (0, 0 but for a cropped surface) */
 	float quad_reveal;		/* below 1: quads show through dots (the DotMatrix style's arrival) */
 	float quad_dpitch;		/* those dots' spacing, in pixels */
+	float quad_radius;		/* above 0: quads drawn with corners this round, points (Fluent) */
 	bool sweeping;			/* a live tile's long line is moving: keep drawing */
 
 	/* ztRetrofit: the shell's style. Metro is Start and its tiles; DotMatrix
@@ -595,6 +596,8 @@ struct zt_server {
 	 * accent tiles then show it through tile_transparency percent of their
 	 * colour, tiles of their own colour stay solid */
 	bool wall_full;
+	bool fluent;		/* the Windows 11 touch on Metro: round corners, Mica, sheen (fluent = on) */
+	bool wall_mica;		/* no photo chosen: Start stands on a Mica ground made from the accent */
 	int tile_transparency;
 	cairo_surface_t *lock_wall;
 	bool locked;
@@ -1304,11 +1307,13 @@ static GLuint gl_program(const char *fragment_head, const char *sampler) {
 		"uniform vec2 uv_scale;\n"
 		"uniform vec2 uv_off;\n"
 		"varying vec2 uv;\n"
+		"varying vec2 lp;\n"
 		"void main() {\n"
+		"	lp = pos;\n"
 		"	uv = uv_off + pos * uv_scale;\n"
 		"	gl_Position = mvp * vec4(pos, 0.0, 1.0);\n"
 		"}\n";
-	char fragment[2048];
+	char fragment[3072];
 	snprintf(fragment, sizeof(fragment),
 		"%s"
 		"precision mediump float;\n"
@@ -1318,7 +1323,13 @@ static GLuint gl_program(const char *fragment_head, const char *sampler) {
 		"#define HP mediump\n"
 		"#endif\n"
 		"varying vec2 uv;\n"
+		"varying vec2 lp;\n"
 		"uniform %s tex;\n"
+		/* Fluent's round corners: the radius as a share of the quad's
+		 * width and height (0: square), and in pixels, for the edge's
+		 * antialiasing */
+		"uniform vec2 rnd;\n"
+		"uniform float rpx;\n"
 		"uniform float alpha;\n"
 		"uniform float swap_rb;\n"
 		"uniform float opaque;\n"
@@ -1340,6 +1351,13 @@ static GLuint gl_program(const char *fragment_head, const char *sampler) {
 		"		float r = 0.36 + max(0.0, reveal - 0.7) * 1.5;\n"
 		"		float m = step(h, reveal / 0.7) * (1.0 - smoothstep(r - 0.08, r, length(fract(q) - 0.5)));\n"
 		"		c *= m;\n"
+		"	}\n"
+		"	if (rnd.x > 0.0) {\n"
+		"		vec2 d = min(lp, 1.0 - lp) / rnd;\n"
+		"		if (d.x < 1.0 && d.y < 1.0) {\n"
+		"			float k = length(1.0 - d);\n"
+		"			c *= clamp((1.0 - k) * rpx + 0.5, 0.0, 1.0);\n"
+		"		}\n"
 		"	}\n"
 		"	gl_FragColor = c * alpha;\n"	/* premultiplied throughout */
 		"}\n", fragment_head, sampler);
@@ -1463,7 +1481,8 @@ static void quad(struct zt_server *server, GLenum target, GLuint tex, const floa
 		struct wlr_output *wo = server->output ? server->output->wlr_output : NULL;
 		if (wo) {
 			qrec_add(tex, target, mvp, alpha, (swap_rb ? 1 : 0) | (opaque ? 2 : 0), uv, server->tint,
-				server->quad_reveal, server->quad_dpitch, wo->width, wo->height);
+				server->quad_reveal, server->quad_dpitch + server->quad_radius * 1000.0f,
+				wo->width, wo->height);
 		}
 	}
 	glUseProgram(program);
@@ -1477,6 +1496,18 @@ static void quad(struct zt_server *server, GLenum target, GLuint tex, const floa
 	glUniform3f(glGetUniformLocation(program, "tint"), server->tint[0], server->tint[1], server->tint[2]);
 	glUniform1f(glGetUniformLocation(program, "reveal"), server->quad_reveal);
 	glUniform1f(glGetUniformLocation(program, "dpitch"), server->quad_dpitch > 0 ? server->quad_dpitch : 1);
+	if (server->quad_radius > 0) {
+		/* the quad's sides in points: its matrix's first two columns (turned or not) */
+		float sx = sqrtf(model[0] * model[0] + model[1] * model[1] + model[2] * model[2]);
+		float sy = sqrtf(model[4] * model[4] + model[5] * model[5] + model[6] * model[6]);
+		float r = server->quad_radius;
+		r = fminf(r, fminf(sx, sy) / 2);
+		glUniform2f(glGetUniformLocation(program, "rnd"), sx > 0 ? r / sx : 0, sy > 0 ? r / sy : 0);
+		glUniform1f(glGetUniformLocation(program, "rpx"), r * server->scale);
+	} else {
+		glUniform2f(glGetUniformLocation(program, "rnd"), 0, 0);
+		glUniform1f(glGetUniformLocation(program, "rpx"), 1);
+	}
 	glActiveTexture(GL_TEXTURE0);
 	glBindTexture(target, tex);
 	/* App textures arrive with GL's default filter, which wants mipmaps that
@@ -1742,6 +1773,30 @@ static void set_rgb(cairo_t *cr, uint32_t color) {
 	}
 	cairo_set_source_rgb(cr, ((color >> 16) & 0xff) / 255.0,
 		((color >> 8) & 0xff) / 255.0, (color & 0xff) / 255.0);
+}
+
+/* a rectangle with round corners, as a path (Fluent's cards and controls) */
+static void round_rect(cairo_t *cr, double x, double y, double w, double h, double r) {
+	r = fmin(r, fmin(w, h) / 2);
+	if (r <= 0) {
+		cairo_rectangle(cr, x, y, w, h);
+		return;
+	}
+	cairo_new_sub_path(cr);
+	cairo_arc(cr, x + w - r, y + r, r, -M_PI / 2, 0);
+	cairo_arc(cr, x + w - r, y + h - r, r, 0, M_PI / 2);
+	cairo_arc(cr, x + r, y + h - r, r, M_PI / 2, M_PI);
+	cairo_arc(cr, x + r, y + r, r, M_PI, 3 * M_PI / 2);
+	cairo_close_path(cr);
+}
+
+/* Fluent's corners: tiles (and what is drawn like them) a little round, the
+ * small ones less; 0 with fluent = off, Metro's square corners */
+#define FLUENT_TILE_R	7.0
+#define FLUENT_SMALL_R	5.0
+#define FLUENT_CTRL_R	4.0
+static double fluent_r(const struct zt_server *server, double r) {
+	return server->fluent ? r : 0;
 }
 
 /* Text of `size` points with its top left at (x, y); centred in a box of
@@ -3027,6 +3082,7 @@ static void load_config(struct zt_server *server) {
 	snprintf(server->lock_wall_path, sizeof(server->lock_wall_path),
 		"%s", "/usr/local/share/backgrounds/ztos/Lumia Cyan lock screens/Wallpaper_01.jpg");
 	server->wall_full = false;
+	server->fluent = true;
 	server->tile_transparency = 35;
 	server->island_on = false;
 	server->island_calibrate = false;
@@ -3083,6 +3139,8 @@ static void load_config(struct zt_server *server) {
 		} else if (strcmp(key, "island_r") == 0) {
 			float r = (float)atof(value);
 			server->island_r = r < 4.0f ? 4.0f : r > 40.0f ? 40.0f : r;
+		} else if (strcmp(key, "fluent") == 0) {
+			server->fluent = strcmp(value, "off") != 0 && strcmp(value, "0") != 0;
 		} else if (strcmp(key, "start_background") == 0) {
 			server->wall_full = strcmp(value, "full") == 0;
 		} else if (strcmp(key, "tile_transparency") == 0) {
@@ -3613,6 +3671,81 @@ static cairo_surface_t *image_cover(const char *path, int pw, int ph) {
 	return out;
 }
 
+/* Start's ground when no photo is chosen and Fluent is on: Windows 11's Mica,
+ * made from the accent – a near-black ground with a few wide, soft blooms of
+ * the accent (and of a lighter and a deeper shade of it), so the tiles, a
+ * little see-through over it, read as acrylic. Made once per accent; a touch
+ * of noise keeps the long gradients from banding on the panel. */
+static void wall_mica(struct zt_server *server) {
+	/* it does not travel (wall_under): a screen and the band above it */
+	double w = server->width, h = server->height * (1 + WALL_MARGIN) + STATUS_H;
+	cairo_t *cr;
+	struct zt_buffer *buffer = zt_buffer_create(server, w, h, &cr);
+	double r = ((server->accent >> 16) & 0xff) / 255.0, g = ((server->accent >> 8) & 0xff) / 255.0,
+		b = (server->accent & 0xff) / 255.0;
+	cairo_pattern_t *ground = cairo_pattern_create_linear(0, 0, 0, h);
+	cairo_pattern_add_color_stop_rgb(ground, 0, 0.075, 0.075, 0.09);
+	cairo_pattern_add_color_stop_rgb(ground, 1, 0.025, 0.025, 0.03);
+	cairo_set_source(cr, ground);
+	cairo_paint(cr);
+	cairo_pattern_destroy(ground);
+	/* the blooms: where, how wide (of the width), how strong, which shade
+	 * (-1 deeper, 0 the accent, 1 lighter) */
+	static const struct { double x, y, rad, a, shade; } blooms[] = {
+		{ 0.90, 0.10, 1.05, 0.95, 0 },
+		{ 0.00, 0.26, 0.90, 0.70, 1 },
+		{ 1.00, 0.50, 0.95, 0.70, -1 },
+		{ 0.10, 0.78, 1.10, 0.60, 0 },
+	};
+	for (size_t i = 0; i < sizeof(blooms) / sizeof(blooms[0]); i++) {
+		double cr_ = r, cg = g, cb = b;
+		if (blooms[i].shade > 0) {
+			cr_ = r + (1 - r) * 0.35; cg = g + (1 - g) * 0.35; cb = b + (1 - b) * 0.35;
+		} else if (blooms[i].shade < 0) {
+			cr_ = r * 0.55; cg = g * 0.55; cb = b * 0.75;
+		}
+		double cx = blooms[i].x * w, cy = blooms[i].y * h, rad = blooms[i].rad * w;
+		cairo_pattern_t *p = cairo_pattern_create_radial(cx, cy, 0, cx, cy, rad);
+		cairo_pattern_add_color_stop_rgba(p, 0, cr_, cg, cb, blooms[i].a);
+		cairo_pattern_add_color_stop_rgba(p, 0.35, cr_, cg, cb, blooms[i].a * 0.55);
+		cairo_pattern_add_color_stop_rgba(p, 0.70, cr_, cg, cb, blooms[i].a * 0.16);
+		cairo_pattern_add_color_stop_rgba(p, 1, cr_, cg, cb, 0);
+		cairo_set_source(cr, p);
+		cairo_paint(cr);
+		cairo_pattern_destroy(p);
+	}
+	/* Mica is calm: the whole of it a little darker toward the bottom */
+	cairo_pattern_t *calm = cairo_pattern_create_linear(0, 0, 0, h);
+	cairo_pattern_add_color_stop_rgba(calm, 0, 0, 0, 0, 0.18);
+	cairo_pattern_add_color_stop_rgba(calm, 0.5, 0, 0, 0, 0.12);
+	cairo_pattern_add_color_stop_rgba(calm, 1, 0, 0, 0, 0.40);
+	cairo_set_source(cr, calm);
+	cairo_paint(cr);
+	cairo_pattern_destroy(calm);
+	cairo_surface_flush(buffer->surface);
+	unsigned char *data = cairo_image_surface_get_data(buffer->surface);
+	int stride = cairo_image_surface_get_stride(buffer->surface);
+	uint32_t seed = 0x9e3779b9u;
+	for (int y = 0; y < buffer->ph; y++) {
+		uint32_t *row = (uint32_t *)(data + (size_t)y * stride);
+		for (int x = 0; x < buffer->pw; x++) {
+			seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5;
+			int d = (int)(seed % 3) - 1;		/* -1, 0 or 1 in each channel */
+			uint32_t px = row[x];
+			int c0 = (int)(px & 0xff) + d, c1 = (int)((px >> 8) & 0xff) + d, c2 = (int)((px >> 16) & 0xff) + d;
+			c0 = c0 < 0 ? 0 : c0 > 255 ? 255 : c0;
+			c1 = c1 < 0 ? 0 : c1 > 255 ? 255 : c1;
+			c2 = c2 < 0 ? 0 : c2 > 255 ? 255 : c2;
+			row[x] = 0xff000000u | (uint32_t)c2 << 16 | (uint32_t)c1 << 8 | (uint32_t)c0;
+		}
+	}
+	cairo_surface_mark_dirty(buffer->surface);
+	g_dump_name = "start-mica";
+	zt_buffer_show(server, &server->wall_layer, buffer, cr, w, h);
+	server->wall_h = h;
+	server->wall_mica = true;
+}
+
 /* Read the two photos again (at start, on SIGHUP, when the screen size is
  * known). */
 static void walls_load(struct zt_server *server) {
@@ -3628,7 +3761,10 @@ static void walls_load(struct zt_server *server) {
 			(int)ceil(server->width * server->scale), (int)ceil(server->height * server->scale));
 	}
 	server->wall_h = 0;
-	if (server->start_wall_path[0]) {
+	server->wall_mica = false;
+	if (!server->start_wall_path[0] && server->fluent) {
+		wall_mica(server);
+	} else if (server->start_wall_path[0]) {
 		double h = server->height * WALL_TALL;
 		cairo_surface_t *img = image_cover(server->start_wall_path,
 			(int)ceil(server->width * server->scale), (int)ceil(h * server->scale));
@@ -3665,6 +3801,9 @@ static void wall_under(struct zt_server *server, const float model[16], double t
 	double margin = server->height * WALL_MARGIN;
 	double travel = server->scroll * WALL_PARALLAX, most = server->wall_h - server->height - margin;
 	travel = travel < 0 ? 0 : travel > most ? (most > 0 ? most : 0) : travel;
+	if (server->wall_mica) {
+		travel = 0;	/* Mica stands still: scrolling moves only the tiles (and copies only them) */
+	}
 	double py = STATUS_H + ty - server->scroll + margin + travel;
 	double max = server->wall_h - th;
 	py = py < 0 ? 0 : py > max ? max : py;
@@ -3725,7 +3864,7 @@ static void tile_badge(cairo_t *cr, const struct tile *t, const char *badge) {
  * tile is its colour at 100 - tile_transparency percent over the photo, and a
  * tile with a colour of its own keeps it, solid. */
 static void tile_paint_face(struct zt_server *server, cairo_t *cr, const struct tile *t) {
-	if (server->wall_h > 0 && server->wall_full) {
+	if (server->wall_h > 0 && (server->wall_full || server->wall_mica)) {
 		double a = t->color == server->accent ? 1.0 - server->tile_transparency / 100.0 : 1.0;
 		cairo_set_source_rgba(cr, ((t->color >> 16) & 0xff) / 255.0, ((t->color >> 8) & 0xff) / 255.0,
 			(t->color & 0xff) / 255.0, a);
@@ -3737,6 +3876,29 @@ static void tile_paint_face(struct zt_server *server, cairo_t *cr, const struct 
 	cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
 	cairo_paint(cr);
 	cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
+	if (server->fluent) {
+		/* Fluent: light falling from above – a sheen fading out by the
+		 * middle, and a hairline round the edge, brighter at the top, as
+		 * Windows 11's cards have (the corners themselves are cut by the
+		 * shader, quad_radius) */
+		double r = t->size == TILE_SMALL ? FLUENT_SMALL_R : FLUENT_TILE_R;
+		cairo_pattern_t *sheen = cairo_pattern_create_linear(0, 0, 0, t->h);
+		cairo_pattern_add_color_stop_rgba(sheen, 0, 1, 1, 1, 0.10);
+		cairo_pattern_add_color_stop_rgba(sheen, 0.55, 1, 1, 1, 0);
+		cairo_pattern_add_color_stop_rgba(sheen, 1, 0, 0, 0, 0.10);
+		cairo_set_source(cr, sheen);
+		cairo_paint(cr);
+		cairo_pattern_destroy(sheen);
+		cairo_pattern_t *line = cairo_pattern_create_linear(0, 0, 0, t->h);
+		cairo_pattern_add_color_stop_rgba(line, 0, 1, 1, 1, 0.26);
+		cairo_pattern_add_color_stop_rgba(line, 0.4, 1, 1, 1, 0.08);
+		cairo_pattern_add_color_stop_rgba(line, 1, 1, 1, 1, 0.05);
+		cairo_set_source(cr, line);
+		cairo_set_line_width(cr, 1.0);
+		round_rect(cr, 0.5, 0.5, t->w - 1, t->h - 1, r - 0.5);
+		cairo_stroke(cr);
+		cairo_pattern_destroy(line);
+	}
 }
 
 static void draw_tile(struct zt_server *server, int i) {
@@ -4584,12 +4746,21 @@ static void draw_item(struct zt_server *server, int i) {
 	set_rgb(cr, server->accent);
 	if (it->header) {
 		cairo_set_line_width(cr, 1.5);
-		cairo_rectangle(cr, 0.75, 0.75, LIST_ICON - 1.5, LIST_ICON - 1.5);
+		round_rect(cr, 0.75, 0.75, LIST_ICON - 1.5, LIST_ICON - 1.5, fluent_r(server, FLUENT_CTRL_R));
 		cairo_stroke(cr);
 		draw_text(cr, it->name, FONT_SEMILIGHT, 27, 4, LIST_ICON - 38, 0, 0, false);
 	} else {
-		cairo_rectangle(cr, 0, 0, LIST_ICON, LIST_ICON);
+		round_rect(cr, 0, 0, LIST_ICON, LIST_ICON, fluent_r(server, FLUENT_CTRL_R + 1));
 		cairo_fill(cr);
+		if (server->fluent) {
+			cairo_pattern_t *sheen = cairo_pattern_create_linear(0, 0, 0, LIST_ICON);
+			cairo_pattern_add_color_stop_rgba(sheen, 0, 1, 1, 1, 0.14);
+			cairo_pattern_add_color_stop_rgba(sheen, 0.6, 1, 1, 1, 0);
+			cairo_set_source(cr, sheen);
+			round_rect(cr, 0, 0, LIST_ICON, LIST_ICON, FLUENT_CTRL_R + 1);
+			cairo_fill(cr);
+			cairo_pattern_destroy(sheen);
+		}
 		cairo_set_source_rgb(cr, 1, 1, 1);
 		char icon[80];
 		snprintf(icon, sizeof(icon), "@%s", it->key);
@@ -5963,8 +6134,16 @@ static void draw_status(struct zt_server *server) {
 	cairo_t *cr;
 	struct zt_buffer *buffer = zt_buffer_create(server, server->width, STATUS_H, &cr);
 	double background = server->call_over_lock ? 0.10 : 0;
-	cairo_set_source_rgb(cr, background, background, background);
-	cairo_paint(cr);
+	if (server->fluent && !server->call_over_lock && !retro_on(server)) {
+		/* acrylic: what is under it shows through, darkened */
+		cairo_set_source_rgba(cr, 0, 0, 0, 0.55);
+		cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
+		cairo_paint(cr);
+		cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
+	} else {
+		cairo_set_source_rgb(cr, background, background, background);
+		cairo_paint(cr);
+	}
 	if (retro_on(server)) {
 		retro_paint_status(server, cr);	/* the DotMatrix style's row */
 		signal_sweep_kick(server);
@@ -6552,7 +6731,7 @@ static void shade_tile_draw(struct zt_server *server, cairo_t *cr, int i, double
 	int q = server->quick[i];
 	if (q == Q_NONE) {
 		cairo_set_source_rgb(cr, 0.07, 0.07, 0.07);
-		cairo_rectangle(cr, 0, 0, w, h);
+		round_rect(cr, 0, 0, w, h, fluent_r(server, FLUENT_CTRL_R));
 		cairo_fill(cr);
 		return;
 	}
@@ -6572,8 +6751,15 @@ static void shade_tile_draw(struct zt_server *server, cairo_t *cr, int i, double
 	} else {
 		cairo_set_source_rgb(cr, 0.122, 0.122, 0.122);
 	}
-	cairo_rectangle(cr, 0, 0, w, h);
+	round_rect(cr, 0, 0, w, h, fluent_r(server, FLUENT_CTRL_R));
 	cairo_fill(cr);
+	if (server->fluent) {
+		/* a hairline, lighter on top, as on the tiles */
+		cairo_set_source_rgba(cr, 1, 1, 1, on ? 0.20 : 0.08);
+		cairo_set_line_width(cr, 1.0);
+		round_rect(cr, 0.5, 0.5, w - 1, h - 1, FLUENT_CTRL_R - 0.5);
+		cairo_stroke(cr);
+	}
 	/* glyph in the top left corner, label along the bottom left */
 	cairo_set_source_rgba(cr, 1, 1, 1, missing ? 0.3 : 1.0);
 	if (q == Q_WIFI) {
@@ -6860,8 +7046,19 @@ static void draw_nav(struct zt_server *server) {
 	}
 	cairo_t *cr;
 	struct zt_buffer *buffer = zt_buffer_create(server, server->width, NAV_H, &cr);
-	cairo_set_source_rgb(cr, 0, 0, 0);
-	cairo_paint(cr);
+	if (server->fluent && !retro_on(server)) {
+		/* acrylic, with a hairline along its top */
+		cairo_set_source_rgba(cr, 0.02, 0.02, 0.03, 0.62);
+		cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
+		cairo_paint(cr);
+		cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
+		cairo_set_source_rgba(cr, 1, 1, 1, 0.08);
+		cairo_rectangle(cr, 0, 0, server->width, 1);
+		cairo_fill(cr);
+	} else {
+		cairo_set_source_rgb(cr, 0, 0, 0);
+		cairo_paint(cr);
+	}
 	if (retro_on(server)) {
 		retro_paint_nav(server, cr);	/* the DotMatrix style's: the dot field goes on under it */
 		zt_buffer_show(server, &server->nav_layer, buffer, cr, server->width, NAV_H);
@@ -13819,7 +14016,15 @@ static void render_frame(struct zt_server *server) {
 		retro_draw(server, output->width, output->height, server->boot_logo_stage != 0, app_covers);
 	} else if (server->start_t < 0.999f && !app_covers) {
 		float page_dx = -server->page * (float)server->width;
-		if (server->wall_full && server->wall_h > 0 && server->page < 0.999f) {
+		if (server->wall_mica && server->wall_h > 0) {
+			/* Mica stays where it is behind Start and the app list both, as
+			 * Windows 11's Start menu does: only what is on it slides */
+			float wm[16];
+			mat_identity(wm);
+			mat_scale(wm, (float)server->width, (float)server->height);
+			wall_under(server, wm, 0, server->scroll - STATUS_H, server->width, server->height,
+				1.0f - (float)server->start_t);
+		} else if (server->wall_full && server->wall_h > 0 && server->page < 0.999f) {
 			/* the photo behind the whole of Start, under the status bar too,
 			 * sliding away with Start toward the app list */
 			float wm[16];
@@ -13892,11 +14097,13 @@ static void render_frame(struct zt_server *server) {
 			mat_scale(m, t->press * grow, t->press * grow);
 			mat_translate(m, (float)(-t->w / 2), (float)(-t->h / 2));
 			mat_scale(m, (float)t->w, (float)t->h);
-			if (!server->wall_full) {
+			server->quad_radius = (float)fluent_r(server, t->size == TILE_SMALL ? FLUENT_SMALL_R : FLUENT_TILE_R);
+			if (!server->wall_full && !server->wall_mica) {
 				wall_under(server, m, t->x, t->y, t->w, t->h, alpha * dim);
 			}
 			quad(server, GL_TEXTURE_2D, face->tex, m, alpha * dim, true, false,
 				(float)face->pw / face->tw, (float)face->ph / face->th);
+			server->quad_radius = 0;
 			if (face == &t->back_layer) {
 				tile_back_sweep(server, t, m, alpha * dim);
 			}
@@ -13975,7 +14182,12 @@ static void render_frame(struct zt_server *server) {
 						mat_identity(band);
 						mat_translate(band, lx, STATUS_H);
 						mat_scale(band, server->width, band_h);
-						quad(server, GL_TEXTURE_2D, server->black_tex, band, alpha, false, false, 1.0f, 1.0f);
+						if (server->wall_mica && server->wall_h > 0) {
+							/* the band is a piece of the Mica behind it */
+							wall_under(server, band, lx, server->scroll, server->width, band_h, alpha);
+						} else {
+							quad(server, GL_TEXTURE_2D, server->black_tex, band, alpha, false, false, 1.0f, 1.0f);
+						}
 					}
 					mat_translate(m, -w / 2, -LIST_ICON / 2.0f);
 					mat_scale(m, w, LIST_ICON);
