@@ -1792,9 +1792,9 @@ static void round_rect(cairo_t *cr, double x, double y, double w, double h, doub
 
 /* Fluent's corners: tiles (and what is drawn like them) a little round, the
  * small ones less; 0 with fluent = off, Metro's square corners */
-#define FLUENT_TILE_R	7.0
-#define FLUENT_SMALL_R	5.0
-#define FLUENT_CTRL_R	4.0
+#define FLUENT_TILE_R	0.0	/* tiles stay square, as in Metro */
+#define FLUENT_SMALL_R	0.0
+#define FLUENT_CTRL_R	0.0
 static double fluent_r(const struct zt_server *server, double r) {
 	return server->fluent ? r : 0;
 }
@@ -4750,14 +4750,14 @@ static void draw_item(struct zt_server *server, int i) {
 		cairo_stroke(cr);
 		draw_text(cr, it->name, FONT_SEMILIGHT, 27, 4, LIST_ICON - 38, 0, 0, false);
 	} else {
-		round_rect(cr, 0, 0, LIST_ICON, LIST_ICON, fluent_r(server, FLUENT_CTRL_R + 1));
+		round_rect(cr, 0, 0, LIST_ICON, LIST_ICON, fluent_r(server, FLUENT_CTRL_R));
 		cairo_fill(cr);
 		if (server->fluent) {
 			cairo_pattern_t *sheen = cairo_pattern_create_linear(0, 0, 0, LIST_ICON);
 			cairo_pattern_add_color_stop_rgba(sheen, 0, 1, 1, 1, 0.14);
 			cairo_pattern_add_color_stop_rgba(sheen, 0.6, 1, 1, 1, 0);
 			cairo_set_source(cr, sheen);
-			round_rect(cr, 0, 0, LIST_ICON, LIST_ICON, FLUENT_CTRL_R + 1);
+			round_rect(cr, 0, 0, LIST_ICON, LIST_ICON, FLUENT_CTRL_R);
 			cairo_fill(cr);
 			cairo_pattern_destroy(sheen);
 		}
@@ -13668,6 +13668,7 @@ struct qrec {
 static struct qrec qrec_cur[QREC_MAX], qrec_prev[QREC_MAX];
 static int qrec_ncur, qrec_nprev = -1;	/* -1: the panel's pixels are not known */
 static bool qrec_on, qrec_overflow;
+static bool qrec_full_next;	/* the next frame goes whole (qrec_settle) */
 static GLuint qrec_uploaded[256];
 static int qrec_nup;
 static bool qrec_up_overflow;
@@ -13786,7 +13787,8 @@ static void qrec_box(pixman_region32_t *dmg, const struct qrec *r) {
 
 /* The frame's damage against the frame before. False: the frame goes whole. */
 static bool qrec_damage(int W, int H, pixman_region32_t *dmg) {
-	if (getenv("ZTMETRO_FULL_FRAMES") || qrec_nprev < 0 || qrec_overflow || qrec_up_overflow) {
+	if (getenv("ZTMETRO_FULL_FRAMES") || qrec_nprev < 0 || qrec_overflow || qrec_up_overflow ||
+			qrec_full_next) {
 		return false;
 	}
 	for (int i = 0; i < qrec_ncur; i++) {
@@ -13836,6 +13838,36 @@ static void qrec_done(bool committed) {
 	qrec_overflow = false;
 	qrec_nup = 0;
 	qrec_up_overflow = false;
+}
+
+/* Once things have settled after frames that went in part (QREC_SETTLE_MS
+ * without another), one whole frame. On the S10, simpledrm's copy of a part
+ * now and then takes a few runs of 16 pixels (one cache line each) from
+ * before the GPU's frame: harmless where the next frame copies that part
+ * again, but left standing where nothing changes after. The whole frame
+ * puts every pixel right; it costs one full copy at the end of a motion. */
+#define QREC_SETTLE_MS	150
+
+static int qrec_settle_fire(void *data) {
+	struct zt_server *server = data;
+	qrec_full_next = true;
+	damage(server);
+	return 0;
+}
+
+static void qrec_settle(struct zt_server *server, bool partial) {
+	static struct wl_event_source *timer;
+	if (!partial) {
+		qrec_full_next = false;		/* this one went whole */
+		if (timer) wl_event_source_timer_update(timer, 0);
+		return;
+	}
+	if (!timer) {
+		timer = wl_event_loop_add_timer(server->loop, qrec_settle_fire, server);
+	}
+	if (timer) {
+		wl_event_source_timer_update(timer, QREC_SETTLE_MS);
+	}
 }
 
 static void frame_shown(struct zt_server *server, struct wlr_buffer *buffer) {
@@ -14538,7 +14570,8 @@ static void render_frame(struct zt_server *server) {
 	}
 
 	wlr_output_state_set_buffer(&state, buffer);
-	if (damaged && !plane && !server->plane_shown) {
+	bool partial = damaged && !plane && !server->plane_shown;
+	if (partial) {
 		wlr_output_state_set_damage(&state, &changed);
 	}
 	pixman_region32_fini(&changed);
@@ -14548,6 +14581,7 @@ static void render_frame(struct zt_server *server) {
 		wlr_buffer_unlock(buffer);
 	} else {
 		qrec_done(true);
+		qrec_settle(server, partial);
 		wlr_buffer_unlock(buffer);
 		bool was = server->plane_shown;
 		server->plane_shown = plane;
