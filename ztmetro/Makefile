@@ -18,7 +18,7 @@ ifneq ($(FOREIGN),)
 $(info removed programs built for another machine, to build them here: $(FOREIGN))
 endif
 
-all: auth/ztos-polkit-agent sounds/ztos-sounds ztmetro apps/ztapps settings/ztsettings devtest/zrndevtest devices/ztdevices perfd/zrnperfd touchkeyd/ztos-touchkeyd sensord/ztoscsf-sensord modemd/ztoscorenetworkingd \
+all: auth/ztos-polkit-agent sounds/ztos-sounds ztmetro apps/ztapps settings/ztsettings devtest/zrndevtest devices/ztdevices perfd/zrnperfd power/ztos-batteryd touchkeyd/ztos-touchkeyd sensord/ztoscsf-sensord modemd/ztoscorenetworkingd \
 	csf/ztoscsf notifyd/ztnotifyd phone/ztphone messages/ztmessages contacts/ztcontacts files/ztfiles splash/ztos-splash \
 	store/ztstore power/ztpower camera/ztcamera sound/ztsound osial/ztosial
 
@@ -92,6 +92,9 @@ osial/ztosial: osial/ztosial.c $(CORE_DEPS)
 # Power Management: battery fuel gauge, sleep diagnostics, wake history
 power/ztpower: power/ztpower.c $(CORE_DEPS)
 	$(APP_BUILD) -o $@ power/ztpower.c $(CORE) $(APP_LIBS)
+
+power/ztos-batteryd: power/ztos-batteryd.c
+	$(CC) $(CFLAGS) $(WARN) -o $@ power/ztos-batteryd.c
 
 perfd/zrnperfd: perfd/zrnperfd.c perfd/tickle.c perfd/tickle.h background-apps.h ztos-user.h perfd/iblog.c perfd/iblog.h perfd/ibnet.c perfd/ibnet.h perfd/perfial.c perfd/perfial.h
 	$(CC) $(CFLAGS) $(WARN) -o $@ perfd/zrnperfd.c perfd/tickle.c perfd/iblog.c perfd/ibnet.c perfd/perfial.c -lm
@@ -229,6 +232,8 @@ install: check-arch
 	install -Dm644 store/data/ztstore.svg /usr/local/share/icons/hicolor/scalable/apps/ztstore.svg
 	install -Dm755 perfd/zrnperfd /usr/local/sbin/zrnperfd
 	install -Dm644 perfd/zrnperfd.service /etc/systemd/system/zrnperfd.service
+	install -Dm755 power/ztos-batteryd /usr/local/sbin/ztos-batteryd
+	install -Dm644 power/ztos-batteryd.service /etc/systemd/system/ztos-batteryd.service
 	install -Dm755 touchkeyd/ztos-touchkeyd /usr/local/sbin/ztos-touchkeyd
 	install -Dm644 touchkeyd/ztos-touchkeyd.service /etc/systemd/system/ztos-touchkeyd.service
 	install -Dm755 sensord/ztoscsf-sensord /usr/local/sbin/ztoscsf-sensord
@@ -252,7 +257,7 @@ install: check-arch
 	install -Dm644 csf/ztoscoresensorframework.service /etc/systemd/system/ztoscoresensorframework.service
 
 clean:
-	rm -f sound/ztsound osial/ztosial auth/ztos-polkit-agent sounds/ztos-sounds ztmetro apps/ztapps xdg-shell-protocol.h settings/ztsettings devtest/zrndevtest devices/ztdevices power/ztpower perfd/zrnperfd touchkeyd/ztos-touchkeyd sensord/ztoscsf-sensord modemd/ztoscorenetworkingd csf/ztoscsf notifyd/ztnotifyd splash/ztos-splash \
+	rm -f sound/ztsound osial/ztosial auth/ztos-polkit-agent sounds/ztos-sounds ztmetro apps/ztapps xdg-shell-protocol.h settings/ztsettings devtest/zrndevtest devices/ztdevices power/ztpower perfd/zrnperfd power/ztos-batteryd touchkeyd/ztos-touchkeyd sensord/ztoscsf-sensord modemd/ztoscorenetworkingd csf/ztoscsf notifyd/ztnotifyd splash/ztos-splash \
 		phone/ztphone messages/ztmessages contacts/ztcontacts files/ztfiles store/ztstore camera/ztcamera core/viewporter-protocol.c core/viewporter-client-protocol.h \
 		core/xdg-shell-client-protocol.h core/xdg-shell-protocol.c
 

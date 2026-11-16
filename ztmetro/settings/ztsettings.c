@@ -140,6 +140,7 @@ enum action {
 	ACT_VIBE_PREVIEW,
 	ACT_OPEN_SOUND,
 	ACT_BATTERY_SAVER,
+	ACT_BATTERY_CARE,
 	ACT_CPU_GOVERNOR,
 	ACT_ZRAM_TOGGLE,
 	ACT_SWAPPINESS_STEP,
@@ -249,6 +250,7 @@ static struct {
 	bool vibrate_silent;
 
 	bool battery_saver;
+	bool battery_care;		/* battery_care: ztos-batteryd charges to 85 % */
 	char cpu_gov[32];
 	bool zram_enabled;
 	int swappiness;
@@ -377,6 +379,8 @@ static void config_load(void) {
             app.media_vol = atoi(val) < 0 ? 0 : atoi(val) > 100 ? 100 : atoi(val);
         } else if (strcmp(key, "columns") == 0) {
 			app.columns = atoi(val);
+		} else if (strcmp(key, "battery_care") == 0) {
+			app.battery_care = strcmp(val, "on") == 0;
 		} else if (strcmp(key, "start_ground") == 0) {
 			app.mica_ground = strcmp(val, "mica") == 0;
 		} else if (strcmp(key, "tile_corners") == 0) {
@@ -560,7 +564,7 @@ static void auto_load(void) {
 
 static void config_save(void) {
 	static const int timeouts[] = { 30, 60, 180, 300, 0 };
-	enum { N_KEYS = 25 + N_HAPTIC_GROUPS };
+	enum { N_KEYS = 26 + N_HAPTIC_GROUPS };
 	struct { const char *key; char value[300]; bool written; } keys[N_KEYS] = {
 		{ .key = "accent" }, { .key = "columns" }, { .key = "haptics" },
 		{ .key = "brightness" }, { .key = "timeout" }, { .key = "demo_tiles" },
@@ -599,6 +603,8 @@ static void config_save(void) {
 	snprintf(keys[22 + N_HAPTIC_GROUPS].value, 32, "%s", dm_palette_names[app.palette]);
 	keys[23 + N_HAPTIC_GROUPS].key = "tile_corners";
 	snprintf(keys[23 + N_HAPTIC_GROUPS].value, 32, "%s", app.round_tiles ? "round" : "square");
+	keys[25 + N_HAPTIC_GROUPS].key = "battery_care";
+	snprintf(keys[25 + N_HAPTIC_GROUPS].value, 32, "%s", app.battery_care ? "on" : "off");
 	keys[24 + N_HAPTIC_GROUPS].key = "start_ground";
 	snprintf(keys[24 + N_HAPTIC_GROUPS].value, 32, "%s", app.mica_ground ? "mica" : "black");
 	snprintf(keys[0].value, 32, "%s", ACCENTS[app.accent].name);
@@ -878,6 +884,8 @@ static void cell_load(void) {
 
 static int brightness_now(void);
 
+static const char *battery_state_words(void);
+
 static double draw_main(cairo_t *cr) {
 	double y = zmc_pivot_next(cr, "system", "applications", ACT_OPEN_PAGE, PAGE_APPS);
 	char detail[128], wifi[96];
@@ -926,8 +934,12 @@ static double draw_main(cairo_t *cr) {
 	char bat_buf[32];
 	read_sys_file(hw_file(hw_battery(), "capacity"), bat_buf, sizeof(bat_buf));
 	int bat = bat_buf[0] ? atoi(bat_buf) : 51;
-	snprintf(detail, sizeof(detail), "%d%%, %s", bat, app.battery_saver ? "battery saver on" : "discharging");
-	y = zmc_entry(cr, y, "battery saver", detail, ACT_OPEN_PAGE, PAGE_BATTERY);
+	{
+		const char *words = battery_state_words();
+		snprintf(detail, sizeof(detail), "%d%%, %s", bat, words[0] ? words : "on battery");
+		for (char *c = detail; *c; c++) *c = (char)tolower((unsigned char)*c);
+	}
+	y = zmc_entry(cr, y, "battery", detail, ACT_OPEN_PAGE, PAGE_BATTERY);
 
 	snprintf(detail, sizeof(detail), "Exynos 9810 (8 cores), %s", app.cpu_gov);
 	y = zmc_entry(cr, y, "processor", detail, ACT_OPEN_PAGE, PAGE_CPU);
@@ -2691,15 +2703,54 @@ static double draw_audio(cairo_t *cr) {
 	return y + 66;
 }
 
-static double draw_battery(cairo_t *cr) {
-	double y = zmc_header(cr, "battery saver");
+/* one key of a key=value status file ("" when there is none) */
+static void status_value(const char *file, const char *key, char *out, size_t size) {
+	out[0] = 0;
+	FILE *f = fopen(file, "r");
+	char line[160];
+	size_t n = strlen(key);
+	while (f && fgets(line, sizeof(line), f)) {
+		if (!strncmp(line, key, n) && line[n] == '=') {
+			snprintf(out, size, "%s", line + n + 1);
+			out[strcspn(out, "\n")] = 0;
+			break;
+		}
+	}
+	if (f) fclose(f);
+}
 
-	char cap[32], stat[32], volt[32];
+static bool battery_saver_on(void) {
+	char profile[32];
+	status_value("/run/zrnperfd.status", "profile", profile, sizeof(profile));
+	return !strcmp(profile, "powersave");
+}
+
+/* what ztos-batteryd says the battery is doing, in words */
+static const char *battery_state_words(void) {
+	char state[32];
+	status_value("/run/ztos-battery.status", "state", state, sizeof(state));
+	if (!strcmp(state, "charging")) return "Charging";
+	if (!strcmp(state, "charging-cool")) return "Charging slower: the battery is warm";
+	if (!strcmp(state, "paused-hot")) return "Charging paused: the battery is hot";
+	if (!strcmp(state, "care-hold")) return "Held at 85 % (battery care)";
+	if (!strcmp(state, "full")) return "Fully charged";
+	if (!strcmp(state, "saver")) return "On battery, battery saver on";
+	if (!strcmp(state, "critical")) return "Battery empty: switching off";
+	if (!strcmp(state, "discharging")) return "On battery";
+	return "";
+}
+
+static double draw_battery(cairo_t *cr) {
+	double y = zmc_header(cr, "battery");
+
+	char cap[32], volt[32], temp[32], full[32], design[32], cycles[32];
 	read_sys_file(hw_file(hw_battery(), "capacity"), cap, sizeof(cap));
-	read_sys_file(hw_file(hw_battery(), "status"), stat, sizeof(stat));
 	read_sys_file(hw_file(hw_battery(), "voltage_now"), volt, sizeof(volt));
-	int pct = cap[0] ? atoi(cap) : 51;
-	double v = volt[0] ? atoi(volt) / 1000000.0 : 3.80;
+	read_sys_file(hw_file(hw_battery(), "temp"), temp, sizeof(temp));
+	read_sys_file(hw_file(hw_battery(), "charge_full"), full, sizeof(full));
+	read_sys_file(hw_file(hw_battery(), "charge_full_design"), design, sizeof(design));
+	read_sys_file(hw_file(hw_battery(), "cycle_count"), cycles, sizeof(cycles));
+	int pct = cap[0] ? atoi(cap) : 0;
 
 	char big_str[16];
 	snprintf(big_str, sizeof(big_str), "%d%%", pct);
@@ -2707,25 +2758,48 @@ static double draw_battery(cairo_t *cr) {
 	zmc_text(cr, big_str, FONT_LIGHT, 56, MARGIN, y, 0);
 	y += 64;
 
+	const char *words = battery_state_words();
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
-	char est[64];
-	snprintf(est, sizeof(est), "%s, %.2f V, Maxim MAX17055", stat[0] ? stat : "Discharging", v);
-	zmc_text(cr, est, FONT_REGULAR, 14, MARGIN, y, 0);
+	zmc_text(cr, words[0] ? words : "Battery service not running", FONT_REGULAR, 14, MARGIN, y, zmc.width - 2 * MARGIN);
 	y += 36;
 
+	bool saver = battery_saver_on();
 	cairo_set_source_rgb(cr, 1, 1, 1);
-	zmc_text(cr, "Battery Saver mode", FONT_SEMILIGHT, 21, MARGIN, y, 0);
+	zmc_text(cr, "Battery saver", FONT_SEMILIGHT, 21, MARGIN, y, 0);
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
-	zmc_text(cr, app.battery_saver ? "Conserving power" : "Standard performance", FONT_REGULAR, 13, MARGIN, y + 26, 0);
-	zmc_toggle(cr, zmc.width - MARGIN - 54, y + 4, app.battery_saver);
+	zmc_text(cr, saver ? "On: slower, lasts longer" : "Turns on by itself below 15 %", FONT_REGULAR, 13, MARGIN, y + 26, 0);
+	zmc_toggle(cr, zmc.width - MARGIN - 54, y + 4, saver);
 	zmc_add_hit(0, y - 4, zmc.width, 52, ACT_BATTERY_SAVER, 0);
 	y += 72;
 
-	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
-	zmc_text(cr, "Battery information", FONT_REGULAR, 13, MARGIN, y, 0);
 	cairo_set_source_rgb(cr, 1, 1, 1);
-	zmc_text(cr, "3000 mAh Li-Ion, Health Good", FONT_REGULAR, 15, MARGIN, y + 20, 0);
+	zmc_text(cr, "Battery care", FONT_SEMILIGHT, 21, MARGIN, y, 0);
+	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
+	zmc_text(cr, "Charge to 85 % only, so the battery ages slower", FONT_REGULAR, 13, MARGIN, y + 26,
+		zmc.width - 2 * MARGIN - 64);
+	zmc_toggle(cr, zmc.width - MARGIN - 54, y + 4, app.battery_care);
+	zmc_add_hit(0, y - 4, zmc.width, 52, ACT_BATTERY_CARE, 0);
+	y += 72;
 
+	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
+	zmc_text(cr, "Battery health", FONT_REGULAR, 13, MARGIN, y, 0);
+	cairo_set_source_rgb(cr, 1, 1, 1);
+	char line[128];
+	long f = full[0] ? atol(full) : 0, d = design[0] ? atol(design) : 0;
+	if (f > 0 && d > 0) {
+		snprintf(line, sizeof(line), "%ld %% of new (%ld of %ld mAh)", f * 100 / d, f / 1000, d / 1000);
+	} else {
+		snprintf(line, sizeof(line), "not known yet");
+	}
+	zmc_text(cr, line, FONT_REGULAR, 15, MARGIN, y + 20, 0);
+	y += 52;
+	snprintf(line, sizeof(line), "%s charge cycles, %.1f °C, %.2f V", cycles[0] ? cycles : "?",
+		temp[0] ? atoi(temp) / 10.0 : 0.0, volt[0] ? atol(volt) / 1e6 : 0.0);
+	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
+	zmc_text(cr, line, FONT_REGULAR, 13, MARGIN, y, 0);
+	y += 32;
+	zmc_text(cr, "Below 5 % a warning; at 2 % the phone switches off by itself, so the battery is never run flat.",
+		FONT_REGULAR, 12, MARGIN, y, zmc.width - 2 * MARGIN);
 	return y + 60;
 }
 
@@ -3638,8 +3712,21 @@ static void activate(int action, int arg) {
 		app.vibrate_silent = !app.vibrate_silent;
 		ring_preferences(true);
 		break;
-	case ACT_BATTERY_SAVER:
-		app.battery_saver = !app.battery_saver;
+	case ACT_BATTERY_SAVER: {
+		/* zrnperfd's power saver profile: slower clocks, fewer cores */
+		bool on = !battery_saver_on();
+		int fd = open("/run/zrnperfd.ctl", O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+		if (fd >= 0) {
+			const char *cmd = on ? "profile powersave\n" : "profile balanced\n";
+			if (write(fd, cmd, strlen(cmd)) < 0) {}
+			close(fd);
+		}
+		app.battery_saver = on;
+		break;
+	}
+	case ACT_BATTERY_CARE:
+		app.battery_care = !app.battery_care;
+		config_save();
 		break;
 	case ACT_CPU_GOVERNOR:
 		if (strcmp(app.cpu_gov, "schedutil") == 0) {

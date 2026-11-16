@@ -1,0 +1,11 @@
+[Unit]
+Description=ztos-batteryd: no deep discharge, no hot charging, battery care
+After=zrnperfd.service
+
+[Service]
+ExecStart=/usr/local/sbin/ztos-batteryd
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
