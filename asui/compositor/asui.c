@@ -1,18 +1,21 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 /*
- * ztGlass: the compositor of ztOS's Glass shell, a phone's way of showing
+ * asui: the compositor of ASUI, the A-SYSTEMS UI, a phone's way of showing
  * windows: one app at a time, full screen, and the home screen under them.
  *
  * It draws next to nothing itself. The home screen, the status bar and the
- * lock screen are the shell's (ztglass-shell, a layer-shell client); this
- * keeps the windows, the touch screen, the keys and the gestures:
+ * lock screen are the shell's (asui-shell, Rust + Slint), two windows that
+ * name themselves by their titles: "ASUI Home" lies under everything, all of
+ * the screen; "ASUI Bar" is the status bar's strip over an app, shown while
+ * one is. This keeps the windows, the touch screen, the keys and the
+ * gestures:
  *
  *   swipe up from the bottom edge     back to the home screen
  *   swipe in from the left edge       back (Escape to the app)
  *   power key                         screen off and on (the shell locks)
  *   volume keys                       the default sink's volume
  *
- * The shell talks to it over $XDG_RUNTIME_DIR/ztglass.sock, a line at a time:
+ * The shell talks to it over $XDG_RUNTIME_DIR/asui.sock, a line at a time:
  *
  *   launch KEY COMMAND...   open the app KEY (its window if it has one)
  *   home                    the home screen
@@ -33,6 +36,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -46,6 +50,9 @@
 #include <xkbcommon/xkbcommon.h>
 
 #include <wlr/backend.h>
+#include <wlr/backend/drm.h>
+#include <wlr/render/dmabuf.h>
+#include <xf86drm.h>
 #include <wlr/interfaces/wlr_buffer.h>
 #include <wlr/interfaces/wlr_keyboard.h>
 #include <wlr/render/allocator.h>
@@ -76,6 +83,7 @@
 #define EDGE_BOTTOM	22.0	/* points: where the home swipe starts */
 #define EDGE_LEFT	14.0	/* where the back swipe starts */
 #define GESTURE_H	16.0	/* the strip under apps, for the home bar */
+#define BAR_H		30	/* the shell's status bar over apps, points */
 #define HOME_DISTANCE	90.0	/* how far up a swipe must go to go home */
 #define BACK_DISTANCE	70.0
 #define FLICK_SPEED	0.45	/* points per ms: a quick flick is enough too */
@@ -94,16 +102,16 @@ struct touch_slot {
 	double vy, vx;			/* points per ms, lately */
 };
 
-struct ztg_server;
+struct asui_server;
 
 struct anim {
 	bool on;
 	uint32_t t0, ms;
 	float from, to;
-	void (*done)(struct ztg_server *);
+	void (*done)(struct asui_server *);
 };
 
-struct ztg_server {
+struct asui_server {
 	struct wl_display *display;
 	struct wl_event_loop *loop;
 	struct wlr_backend *backend;
@@ -133,7 +141,7 @@ struct ztg_server {
 	struct wl_listener touch_down, touch_up, touch_motion, touch_cancel, touch_frame;
 
 	struct wlr_box full, usable, app_box;
-	struct ztg_view *shown;
+	struct asui_view *shown;
 	float offset, alpha;		/* the shown app's slide (points, up < 0) and fade */
 	struct anim anim;
 	bool blanked;
@@ -152,11 +160,12 @@ struct ztg_server {
 	char *shell_cmd;
 	pid_t shell_pid;
 	struct wl_event_source *shell_timer;
+	bool cache_maint;	/* simpledrm: drop stale CPU cache lines of each frame (cache_drop) */
 };
 
-struct ztg_view {
+struct asui_view {
 	struct wl_list link;
-	struct ztg_server *server;
+	struct asui_server *server;
 	struct wlr_xdg_toplevel *toplevel;
 	struct wlr_scene_tree *tree;
 	struct wlr_xdg_toplevel_decoration_v1 *decoration;
@@ -164,24 +173,25 @@ struct ztg_view {
 	struct wl_listener deco_mode, deco_destroy;
 	char key[128];
 	bool mapped;
+	enum { ROLE_APP, ROLE_HOME, ROLE_BAR } role;	/* the shell's own windows, by title */
 };
 
-struct ztg_layer {
+struct asui_layer {
 	struct wl_list link;
-	struct ztg_server *server;
+	struct asui_server *server;
 	struct wlr_layer_surface_v1 *surface;
 	struct wlr_scene_layer_surface_v1 *scene;
 	struct wl_listener map, unmap, commit, destroy, new_popup;
 };
 
-struct ztg_popup {
+struct asui_popup {
 	struct wlr_xdg_popup *popup;
 	struct wl_listener commit, destroy;
 };
 
-struct ztg_keyboard {
+struct asui_keyboard {
 	struct wl_list link;
-	struct ztg_server *server;
+	struct asui_server *server;
 	struct wlr_keyboard *keyboard;
 	struct wl_listener key, destroy;
 };
@@ -194,8 +204,8 @@ static uint32_t now_ms(void) {
 
 /* ---- the shell's socket ------------------------------------------------------------- */
 
-static void tell(struct ztg_server *server, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
-static void tell(struct ztg_server *server, const char *fmt, ...) {
+static void tell(struct asui_server *server, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
+static void tell(struct asui_server *server, const char *fmt, ...) {
 	char line[1024];
 	va_list ap;
 	va_start(ap, fmt);
@@ -214,11 +224,11 @@ static void tell(struct ztg_server *server, const char *fmt, ...) {
 	}
 }
 
-static void tell_apps(struct ztg_server *server) {
+static void tell_apps(struct asui_server *server) {
 	char line[1000] = "apps";
-	struct ztg_view *view;
+	struct asui_view *view;
 	wl_list_for_each(view, &server->views, link) {
-		if (view->mapped && view->key[0] && strlen(line) + strlen(view->key) + 2 < sizeof(line)) {
+		if (view->mapped && view->role == ROLE_APP && view->key[0] && strlen(line) + strlen(view->key) + 2 < sizeof(line)) {
 			strcat(line, " ");
 			strcat(line, view->key);
 		}
@@ -244,7 +254,7 @@ static pid_t spawn(const char *command) {
 }
 
 static int start_shell(void *data) {
-	struct ztg_server *server = data;
+	struct asui_server *server = data;
 	if (server->shell_cmd) {
 		server->shell_pid = spawn(server->shell_cmd);
 		wlr_log(WLR_INFO, "shell: started %s as %d", server->shell_cmd, server->shell_pid);
@@ -253,7 +263,7 @@ static int start_shell(void *data) {
 }
 
 static int on_sigchld(int signal_number, void *data) {
-	struct ztg_server *server = data;
+	struct asui_server *server = data;
 	pid_t pid;
 	int status;
 	while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
@@ -288,15 +298,26 @@ static pid_t parent_of(pid_t pid) {
 
 /* ---- the layout --------------------------------------------------------------------------- */
 
-static void place_view(struct ztg_view *view) {
-	struct ztg_server *server = view->server;
+static void place_view(struct asui_view *view) {
+	struct asui_server *server = view->server;
+	if (view->role != ROLE_APP) {
+		wlr_scene_node_set_position(&view->tree->node, 0, 0);
+		return;
+	}
 	wlr_scene_node_set_position(&view->tree->node, server->app_box.x,
 		server->app_box.y + (view == server->shown ? (int)lroundf(server->offset) : 0));
 }
 
-static void configure_view(struct ztg_view *view) {
-	struct ztg_server *server = view->server;
+static void configure_view(struct asui_view *view) {
+	struct asui_server *server = view->server;
 	if (!view->toplevel->base->initialized) {
+		return;
+	}
+	if (view->role != ROLE_APP) {
+		wlr_xdg_toplevel_set_size(view->toplevel, server->full.width,
+			view->role == ROLE_HOME ? server->full.height : BAR_H);
+		wlr_xdg_toplevel_set_fullscreen(view->toplevel, view->role == ROLE_HOME);
+		place_view(view);
 		return;
 	}
 	wlr_xdg_toplevel_set_size(view->toplevel, server->app_box.width, server->app_box.height);
@@ -305,8 +326,8 @@ static void configure_view(struct ztg_view *view) {
 	place_view(view);
 }
 
-static void arrange_layer(struct ztg_server *server, enum zwlr_layer_shell_v1_layer which, bool exclusive) {
-	struct ztg_layer *layer;
+static void arrange_layer(struct asui_server *server, enum zwlr_layer_shell_v1_layer which, bool exclusive) {
+	struct asui_layer *layer;
 	wl_list_for_each(layer, &server->layers, link) {
 		struct wlr_layer_surface_v1 *s = layer->surface;
 		if (!s->initialized || s->current.layer != which) {
@@ -319,7 +340,7 @@ static void arrange_layer(struct ztg_server *server, enum zwlr_layer_shell_v1_la
 	}
 }
 
-static void arrange(struct ztg_server *server) {
+static void arrange(struct asui_server *server) {
 	if (!server->output) {
 		return;
 	}
@@ -332,7 +353,8 @@ static void arrange(struct ztg_server *server) {
 		}
 	}
 	server->app_box = server->usable;
-	server->app_box.height -= (int)GESTURE_H;
+	server->app_box.y += BAR_H;	/* the shell's bar over it */
+	server->app_box.height -= BAR_H + (int)GESTURE_H;
 	wlr_scene_rect_set_size(server->app_black, server->full.width, server->full.height);
 	wlr_scene_rect_set_size(server->blank, server->full.width, server->full.height);
 	if (server->home_bar) {
@@ -340,7 +362,7 @@ static void arrange(struct ztg_server *server) {
 		wlr_scene_node_set_position(&server->home_bar->node, (server->full.width - w) / 2,
 			server->full.height - (int)(GESTURE_H / 2) - h / 2);
 	}
-	struct ztg_view *view;
+	struct asui_view *view;
 	wl_list_for_each(view, &server->views, link) {
 		configure_view(view);
 	}
@@ -380,7 +402,7 @@ static const struct wlr_buffer_impl cbuf_impl = {
 };
 
 /* The home bar: a short rounded line, light on the black under apps. */
-static void make_home_bar(struct ztg_server *server) {
+static void make_home_bar(struct asui_server *server) {
 	double w = 128, h = 5, s = server->scale;
 	int pw = (int)ceil(w * s), ph = (int)ceil(h * s);
 	struct cairo_buffer *b = calloc(1, sizeof(*b));
@@ -412,7 +434,7 @@ static void set_opacity(struct wlr_scene_buffer *buffer, int sx, int sy, void *d
 	wlr_scene_buffer_set_opacity(buffer, *(float *)data);
 }
 
-static void apply_motion(struct ztg_server *server) {
+static void apply_motion(struct asui_server *server) {
 	if (!server->shown) {
 		return;
 	}
@@ -424,7 +446,7 @@ static void apply_motion(struct ztg_server *server) {
 	wlr_scene_rect_set_color(server->app_black, black);
 }
 
-static void focus(struct ztg_server *server, struct wlr_surface *surface) {
+static void focus(struct asui_server *server, struct wlr_surface *surface) {
 	if (!surface) {
 		wlr_seat_keyboard_notify_clear_focus(server->seat);
 		return;
@@ -433,17 +455,35 @@ static void focus(struct ztg_server *server, struct wlr_surface *surface) {
 		server->vkbd.num_keycodes, &server->vkbd.modifiers);
 }
 
-static void animate(struct ztg_server *server, float from, float to, uint32_t ms, void (*done)(struct ztg_server *)) {
+static void animate(struct asui_server *server, float from, float to, uint32_t ms, void (*done)(struct asui_server *)) {
 	server->anim = (struct anim){ .on = true, .t0 = now_ms(), .ms = ms, .from = from, .to = to, .done = done };
 	if (server->output) {
 		wlr_output_schedule_frame(server->output);
 	}
 }
 
+/* The shell's bar: over the app while one is shown; otherwise under the
+ * home screen, where it is out of sight but still on the screen, so it keeps
+ * its scale and its frames and is drawn when an app comes. */
+static void place_bar(struct asui_server *server, struct asui_view *bar, bool over) {
+	wlr_scene_node_reparent(&bar->tree->node, over ? server->layer_top : server->layer_bg);
+	if (!over) {
+		wlr_scene_node_lower_to_bottom(&bar->tree->node);
+	}
+	wlr_scene_node_set_enabled(&bar->tree->node, bar->mapped);
+}
+
 /* An app, or the home screen (NULL), now; no motion. */
-static void show(struct ztg_server *server, struct ztg_view *view) {
-	struct ztg_view *v;
+static void show(struct asui_server *server, struct asui_view *view) {
+	struct asui_view *v;
 	wl_list_for_each(v, &server->views, link) {
+		if (v->role == ROLE_HOME) {
+			continue;	/* always there, under everything */
+		}
+		if (v->role == ROLE_BAR) {
+			place_bar(server, v, view != NULL);
+			continue;
+		}
 		wlr_xdg_toplevel_set_activated(v->toplevel, v == view);
 		wlr_scene_node_set_enabled(&v->tree->node, v == view && v->mapped);
 	}
@@ -469,17 +509,17 @@ static void show(struct ztg_server *server, struct ztg_view *view) {
 	}
 }
 
-static void went_home(struct ztg_server *server) {
+static void went_home(struct asui_server *server) {
 	show(server, NULL);
 }
 
-static void settle(struct ztg_server *server) {
+static void settle(struct asui_server *server) {
 	server->offset = 0;
 	server->alpha = 1;
 	apply_motion(server);
 }
 
-static void go_home(struct ztg_server *server) {
+static void go_home(struct asui_server *server) {
 	if (!server->shown) {
 		tell(server, "home");	/* already: the shell takes it as "first page" */
 		return;
@@ -489,7 +529,7 @@ static void go_home(struct ztg_server *server) {
 	animate(server, server->offset, -(float)server->full.height * 0.45f, 220, went_home);
 }
 
-static void open_view(struct ztg_server *server, struct ztg_view *view) {
+static void open_view(struct asui_server *server, struct asui_view *view) {
 	show(server, view);
 	/* it rises a little into place as it fades in */
 	server->offset = 36;
@@ -498,7 +538,7 @@ static void open_view(struct ztg_server *server, struct ztg_view *view) {
 	animate(server, 36, 0, 210, settle);
 }
 
-static void step_animation(struct ztg_server *server) {
+static void step_animation(struct asui_server *server) {
 	struct anim *a = &server->anim;
 	if (!a->on) {
 		return;
@@ -525,8 +565,8 @@ static void step_animation(struct ztg_server *server) {
 	}
 }
 
-static struct ztg_view *view_by_key(struct ztg_server *server, const char *key) {
-	struct ztg_view *view;
+static struct asui_view *view_by_key(struct asui_server *server, const char *key) {
+	struct asui_view *view;
 	wl_list_for_each(view, &server->views, link) {
 		if (view->mapped && view->key[0] && strcmp(view->key, key) == 0) {
 			return view;
@@ -537,7 +577,12 @@ static struct ztg_view *view_by_key(struct ztg_server *server, const char *key) 
 
 /* ---- the keys ------------------------------------------------------------------------------ */
 
-static void set_blank(struct ztg_server *server, bool blanked) {
+static void set_blank(struct asui_server *server, bool blanked) {
+	if (blanked && server->shown) {
+		/* the shell locks under the blank: what wakes is its lock, not the app */
+		server->anim.on = false;
+		show(server, NULL);
+	}
 	server->blanked = blanked;
 	wlr_scene_node_set_enabled(&server->blank->node, blanked);
 	wlr_scene_node_raise_to_top(&server->blank->node);
@@ -554,7 +599,7 @@ static void set_blank(struct ztg_server *server, bool blanked) {
 	}
 }
 
-static void send_key(struct ztg_server *server, uint32_t keycode) {
+static void send_key(struct asui_server *server, uint32_t keycode) {
 	uint32_t t = now_ms();
 	wlr_seat_set_keyboard(server->seat, &server->vkbd);
 	wlr_seat_keyboard_notify_key(server->seat, t, keycode, WL_KEYBOARD_KEY_STATE_PRESSED);
@@ -562,8 +607,8 @@ static void send_key(struct ztg_server *server, uint32_t keycode) {
 }
 
 static void keyboard_key(struct wl_listener *listener, void *data) {
-	struct ztg_keyboard *kb = wl_container_of(listener, kb, key);
-	struct ztg_server *server = kb->server;
+	struct asui_keyboard *kb = wl_container_of(listener, kb, key);
+	struct asui_server *server = kb->server;
 	struct wlr_keyboard_key_event *event = data;
 	bool down = event->state == WL_KEYBOARD_KEY_STATE_PRESSED;
 	switch (event->keycode) {
@@ -600,7 +645,7 @@ static void keyboard_key(struct wl_listener *listener, void *data) {
 }
 
 static void keyboard_destroy(struct wl_listener *listener, void *data) {
-	struct ztg_keyboard *kb = wl_container_of(listener, kb, destroy);
+	struct asui_keyboard *kb = wl_container_of(listener, kb, destroy);
 	wl_list_remove(&kb->key.link);
 	wl_list_remove(&kb->destroy.link);
 	wl_list_remove(&kb->link);
@@ -611,7 +656,7 @@ static void vkbd_leds(struct wlr_keyboard *keyboard, uint32_t leds) {
 }
 
 static const struct wlr_keyboard_impl vkbd_impl = {
-	.name = "ztglass-keys",
+	.name = "asui-keys",
 	.led_update = vkbd_leds,
 };
 
@@ -624,7 +669,7 @@ static struct xkb_keymap *default_keymap(void) {
 
 /* ---- touch ---------------------------------------------------------------------------------- */
 
-static struct touch_slot *slot_for(struct ztg_server *server, int32_t id, bool make) {
+static struct touch_slot *slot_for(struct asui_server *server, int32_t id, bool make) {
 	for (int i = 0; i < MAX_TOUCH; i++) {
 		if (server->touches[i].role != TOUCH_NONE && server->touches[i].id == id) {
 			return &server->touches[i];
@@ -642,7 +687,7 @@ static struct touch_slot *slot_for(struct ztg_server *server, int32_t id, bool m
 	return NULL;
 }
 
-static bool gesture_running(struct ztg_server *server) {
+static bool gesture_running(struct asui_server *server) {
 	for (int i = 0; i < MAX_TOUCH; i++) {
 		if (server->touches[i].role == TOUCH_HOME || server->touches[i].role == TOUCH_BACK) {
 			return true;
@@ -651,7 +696,7 @@ static bool gesture_running(struct ztg_server *server) {
 	return false;
 }
 
-static struct wlr_surface *surface_at(struct ztg_server *server, double lx, double ly, double *sx, double *sy) {
+static struct wlr_surface *surface_at(struct asui_server *server, double lx, double ly, double *sx, double *sy) {
 	struct wlr_scene_node *node = wlr_scene_node_at(&server->scene->tree.node, lx, ly, sx, sy);
 	if (!node || node->type != WLR_SCENE_NODE_BUFFER) {
 		return NULL;
@@ -661,7 +706,7 @@ static struct wlr_surface *surface_at(struct ztg_server *server, double lx, doub
 }
 
 static void touch_down(struct wl_listener *listener, void *data) {
-	struct ztg_server *server = wl_container_of(listener, server, touch_down);
+	struct asui_server *server = wl_container_of(listener, server, touch_down);
 	struct wlr_touch_down_event *event = data;
 	double lx, ly;
 	wlr_cursor_absolute_to_layout_coords(server->cursor, &event->touch->base, event->x, event->y, &lx, &ly);
@@ -697,7 +742,7 @@ static void touch_down(struct wl_listener *listener, void *data) {
 }
 
 static void touch_motion(struct wl_listener *listener, void *data) {
-	struct ztg_server *server = wl_container_of(listener, server, touch_motion);
+	struct asui_server *server = wl_container_of(listener, server, touch_motion);
 	struct wlr_touch_motion_event *event = data;
 	struct touch_slot *slot = slot_for(server, event->touch_id, false);
 	if (!slot) {
@@ -733,7 +778,7 @@ static void touch_motion(struct wl_listener *listener, void *data) {
 }
 
 static void touch_up(struct wl_listener *listener, void *data) {
-	struct ztg_server *server = wl_container_of(listener, server, touch_up);
+	struct asui_server *server = wl_container_of(listener, server, touch_up);
 	struct wlr_touch_up_event *event = data;
 	struct touch_slot *slot = slot_for(server, event->touch_id, false);
 	if (!slot) {
@@ -768,7 +813,7 @@ static void touch_up(struct wl_listener *listener, void *data) {
 }
 
 static void touch_cancel(struct wl_listener *listener, void *data) {
-	struct ztg_server *server = wl_container_of(listener, server, touch_cancel);
+	struct asui_server *server = wl_container_of(listener, server, touch_cancel);
 	struct wlr_touch_cancel_event *event = data;
 	struct touch_slot *slot = slot_for(server, event->touch_id, false);
 	if (!slot) {
@@ -783,18 +828,18 @@ static void touch_cancel(struct wl_listener *listener, void *data) {
 }
 
 static void touch_frame(struct wl_listener *listener, void *data) {
-	struct ztg_server *server = wl_container_of(listener, server, touch_frame);
+	struct asui_server *server = wl_container_of(listener, server, touch_frame);
 	wlr_seat_touch_notify_frame(server->seat);
 }
 
 /* ---- inputs --------------------------------------------------------------------------------- */
 
 static void new_input(struct wl_listener *listener, void *data) {
-	struct ztg_server *server = wl_container_of(listener, server, new_input);
+	struct asui_server *server = wl_container_of(listener, server, new_input);
 	struct wlr_input_device *device = data;
 	switch (device->type) {
 	case WLR_INPUT_DEVICE_KEYBOARD: {
-		struct ztg_keyboard *kb = calloc(1, sizeof(*kb));
+		struct asui_keyboard *kb = calloc(1, sizeof(*kb));
 		kb->server = server;
 		kb->keyboard = wlr_keyboard_from_input_device(device);
 		struct xkb_keymap *keymap = default_keymap();
@@ -825,32 +870,134 @@ static void new_input(struct wl_listener *listener, void *data) {
 
 /* ---- the screen ---------------------------------------------------------------------------- */
 
-struct ztg_output {
-	struct ztg_server *server;
+struct asui_output {
+	struct asui_server *server;
 	struct wlr_output *output;
 	struct wl_listener frame, request_state, destroy;
 };
 
+/* ---- the GPU's pixels past the CPU's cache ----------------------------------------
+ *
+ * As in ASMS (ztmetro.c, cache_drop): on the S10 the frames are simpledrm's
+ * own buffers, mapped cached in the kernel, which the Mali (not coherent)
+ * writes past the CPU caches. simpledrm copies only the damage to the panel,
+ * with the CPU, and where the lines it read in earlier frames are still
+ * cached it copies those: runs of 16 pixels of old frames stay on the panel.
+ * So before each commit, the lines of the damage are cleaned and invalidated
+ * to the point of coherency (DC CIVAC, allowed in user space) through a
+ * mapping of the frame's dma-buf. */
+struct cache_map {
+	struct wlr_buffer *buffer;
+	struct wl_listener destroy;
+	uint8_t *data;
+	size_t len;
+	uint32_t stride, offset;
+};
+static struct cache_map cache_maps[4];
+
+static void cache_map_drop(struct cache_map *c) {
+	if (c->data) munmap(c->data, c->len);
+	if (c->buffer) wl_list_remove(&c->destroy.link);
+	memset(c, 0, sizeof(*c));
+}
+
+static void cache_map_gone(struct wl_listener *listener, void *data) {
+	struct cache_map *c = wl_container_of(listener, c, destroy);
+	cache_map_drop(c);
+}
+
+static struct cache_map *cache_map_for(struct wlr_buffer *buffer) {
+	for (int i = 0; i < 4; i++) {
+		if (cache_maps[i].buffer == buffer) return &cache_maps[i];
+	}
+	struct wlr_dmabuf_attributes dmabuf;
+	if (!wlr_buffer_get_dmabuf(buffer, &dmabuf) || dmabuf.n_planes != 1) return NULL;
+	struct cache_map *c = NULL;
+	for (int i = 0; i < 4 && !c; i++) {
+		if (!cache_maps[i].buffer) c = &cache_maps[i];
+	}
+	if (!c) {
+		c = &cache_maps[0];
+		cache_map_drop(c);
+	}
+	size_t len = (size_t)dmabuf.offset[0] + (size_t)dmabuf.stride[0] * dmabuf.height;
+	void *data = mmap(NULL, len, PROT_READ, MAP_SHARED, dmabuf.fd[0], 0);
+	if (data == MAP_FAILED) {
+		wlr_log_errno(WLR_ERROR, "cache: cannot map the frame");
+		return NULL;
+	}
+	*c = (struct cache_map){ .buffer = buffer, .data = data, .len = len,
+		.stride = dmabuf.stride[0], .offset = dmabuf.offset[0] };
+	c->destroy.notify = cache_map_gone;
+	wl_signal_add(&buffer->events.destroy, &c->destroy);
+	return c;
+}
+
+static void cache_drop(struct wlr_buffer *buffer, int x0, int y0, int x1, int y1) {
+#if defined(__aarch64__)
+	struct cache_map *c = cache_map_for(buffer);
+	if (!c) return;
+	uint64_t ctr;
+	__asm__ volatile("mrs %0, ctr_el0" : "=r"(ctr));
+	uintptr_t line = (uintptr_t)4 << ((ctr >> 16) & 0xf);
+	x0 = x0 < 0 ? 0 : x0;
+	y0 = y0 < 0 ? 0 : y0;
+	x1 = x1 > buffer->width ? buffer->width : x1;
+	y1 = y1 > buffer->height ? buffer->height : y1;
+	for (int y = y0; y < y1; y++) {
+		uintptr_t a = (uintptr_t)(c->data + c->offset + (size_t)y * c->stride + (size_t)x0 * 4);
+		uintptr_t end = (uintptr_t)(c->data + c->offset + (size_t)y * c->stride + (size_t)x1 * 4);
+		for (a &= ~(line - 1); a < end; a += line) {
+			__asm__ volatile("dc civac, %0" : : "r"(a) : "memory");
+		}
+	}
+	__asm__ volatile("dsb sy" : : : "memory");
+#else
+	(void)buffer; (void)x0; (void)y0; (void)x1; (void)y1;
+#endif
+}
+
 static void on_frame(struct wl_listener *listener, void *data) {
-	struct ztg_output *o = wl_container_of(listener, o, frame);
-	struct ztg_server *server = o->server;
+	struct asui_output *o = wl_container_of(listener, o, frame);
+	struct asui_server *server = o->server;
 	step_animation(server);
 	struct wlr_scene_output *so = wlr_scene_get_scene_output(server->scene, o->output);
-	wlr_scene_output_commit(so, NULL);
+	if (!server->cache_maint) {
+		wlr_scene_output_commit(so, NULL);
+	} else if (wlr_scene_output_needs_frame(so)) {
+		struct wlr_output_state state;
+		wlr_output_state_init(&state);
+		if (wlr_scene_output_build_state(so, &state, NULL) && (state.committed & WLR_OUTPUT_STATE_BUFFER)) {
+			struct wlr_buffer *buffer = state.buffer;
+			if (state.committed & WLR_OUTPUT_STATE_DAMAGE) {
+				int n = 0;
+				pixman_box32_t *b = pixman_region32_rectangles(&state.damage, &n);
+				for (int i = 0; i < n; i++) {
+					cache_drop(buffer, b[i].x1, b[i].y1, b[i].x2, b[i].y2);
+				}
+			} else {
+				cache_drop(buffer, 0, 0, buffer->width, buffer->height);
+			}
+			wlr_output_commit_state(o->output, &state);
+		} else if (state.committed) {
+			wlr_output_commit_state(o->output, &state);
+		}
+		wlr_output_state_finish(&state);
+	}
 	struct timespec now;
 	clock_gettime(CLOCK_MONOTONIC, &now);
 	wlr_scene_output_send_frame_done(so, &now);
 }
 
 static void on_request_state(struct wl_listener *listener, void *data) {
-	struct ztg_output *o = wl_container_of(listener, o, request_state);
+	struct asui_output *o = wl_container_of(listener, o, request_state);
 	const struct wlr_output_event_request_state *event = data;
 	wlr_output_commit_state(o->output, event->state);
 	arrange(o->server);
 }
 
 static void on_output_destroy(struct wl_listener *listener, void *data) {
-	struct ztg_output *o = wl_container_of(listener, o, destroy);
+	struct asui_output *o = wl_container_of(listener, o, destroy);
 	if (o->server->output == o->output) {
 		o->server->output = NULL;
 	}
@@ -861,7 +1008,7 @@ static void on_output_destroy(struct wl_listener *listener, void *data) {
 }
 
 static void new_output(struct wl_listener *listener, void *data) {
-	struct ztg_server *server = wl_container_of(listener, server, new_output);
+	struct asui_server *server = wl_container_of(listener, server, new_output);
 	struct wlr_output *output = data;
 	if (server->output) {
 		return;	/* one screen */
@@ -880,7 +1027,7 @@ static void new_output(struct wl_listener *listener, void *data) {
 	}
 	wlr_output_state_finish(&state);
 
-	struct ztg_output *o = calloc(1, sizeof(*o));
+	struct asui_output *o = calloc(1, sizeof(*o));
 	o->server = server;
 	o->output = output;
 	o->frame.notify = on_frame;
@@ -902,20 +1049,20 @@ static void new_output(struct wl_listener *listener, void *data) {
 
 /* ---- windows -------------------------------------------------------------------------------- */
 
-static struct ztg_view *view_of_toplevel(struct wlr_xdg_toplevel *toplevel) {
+static struct asui_view *view_of_toplevel(struct wlr_xdg_toplevel *toplevel) {
 	struct wlr_scene_tree *tree = toplevel->base->data;
 	return tree ? tree->node.data : NULL;
 }
 
-static void deco_apply(struct ztg_view *view) {
+static void deco_apply(struct asui_view *view) {
 	if (view->decoration && view->toplevel->base->initialized) {
 		wlr_xdg_toplevel_decoration_v1_set_mode(view->decoration,
 			WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
 	}
 }
 
-static void name_view(struct ztg_view *view) {
-	struct ztg_server *server = view->server;
+static void name_view(struct asui_view *view) {
+	struct asui_server *server = view->server;
 	pid_t pid = 0;
 	uid_t uid;
 	gid_t gid;
@@ -958,18 +1105,48 @@ static void name_view(struct ztg_view *view) {
 	wlr_log(WLR_INFO, "window: pid %d app_id '%s' is '%s'", pid, app_id, view->key);
 }
 
+/* the shell's windows say what they are by their titles */
+static void classify_view(struct asui_view *view) {
+	struct asui_server *server = view->server;
+	const char *title = view->toplevel->title ? view->toplevel->title : "";
+	int role = !strcmp(title, "ASUI Home") ? ROLE_HOME : !strcmp(title, "ASUI Bar") ? ROLE_BAR : ROLE_APP;
+	if (role == (int)view->role) {
+		return;
+	}
+	view->role = role;
+	if (role == ROLE_BAR) {
+		place_bar(server, view, server->shown != NULL);
+	} else {
+		wlr_scene_node_reparent(&view->tree->node, role == ROLE_HOME ? server->layer_bg : server->apps);
+	}
+	wlr_log(WLR_INFO, "window: '%s' is the shell's %s", title, role == ROLE_HOME ? "home" : "bar");
+	configure_view(view);
+}
+
 static void view_map(struct wl_listener *listener, void *data) {
-	struct ztg_view *view = wl_container_of(listener, view, map);
+	struct asui_view *view = wl_container_of(listener, view, map);
 	view->mapped = true;
+	classify_view(view);
+	if (view->role == ROLE_BAR) {
+		place_bar(view->server, view, view->server->shown != NULL);
+		return;
+	}
+	if (view->role == ROLE_HOME) {
+		wlr_scene_node_set_enabled(&view->tree->node, true);
+		return;
+	}
 	name_view(view);
 	open_view(view->server, view);
 	tell_apps(view->server);
 }
 
 static void view_unmap(struct wl_listener *listener, void *data) {
-	struct ztg_view *view = wl_container_of(listener, view, unmap);
-	struct ztg_server *server = view->server;
+	struct asui_view *view = wl_container_of(listener, view, unmap);
+	struct asui_server *server = view->server;
 	view->mapped = false;
+	if (view->role != ROLE_APP) {
+		return;
+	}
 	if (server->shown == view) {
 		server->anim.on = false;
 		show(server, NULL);
@@ -978,8 +1155,20 @@ static void view_unmap(struct wl_listener *listener, void *data) {
 }
 
 static void view_commit(struct wl_listener *listener, void *data) {
-	struct ztg_view *view = wl_container_of(listener, view, commit);
+	struct asui_view *view = wl_container_of(listener, view, commit);
+	if (getenv("ASUI_SIZES")) {
+		struct wlr_surface *s = view->toplevel->base->surface;
+		static int last[8][5];
+		int k = view->role;
+		int now[5] = { s->current.width, s->current.height, s->current.buffer_width, s->current.buffer_height, s->current.scale };
+		if (memcmp(last[k], now, sizeof(now))) {
+			memcpy(last[k], now, sizeof(now));
+			wlr_log(WLR_INFO, "sizes: role %d surface %dx%d buffer %dx%d scale %d viewport %d", k, now[0], now[1],
+				now[2], now[3], now[4], s->current.viewport.has_dst);
+		}
+	}
 	if (view->toplevel->base->initial_commit) {
+		classify_view(view);
 		configure_view(view);
 		deco_apply(view);
 	}
@@ -987,28 +1176,28 @@ static void view_commit(struct wl_listener *listener, void *data) {
 
 static void view_request(struct wl_listener *listener, void *data) {
 	/* full screen, maximized: it is all of the screen it gets already, say so again */
-	struct ztg_view *view = wl_container_of(listener, view, request_maximize);
+	struct asui_view *view = wl_container_of(listener, view, request_maximize);
 	if (view->toplevel->base->initialized) {
 		wlr_xdg_surface_schedule_configure(view->toplevel->base);
 	}
 }
 
 static void view_request_fs(struct wl_listener *listener, void *data) {
-	struct ztg_view *view = wl_container_of(listener, view, request_fullscreen);
+	struct asui_view *view = wl_container_of(listener, view, request_fullscreen);
 	if (view->toplevel->base->initialized) {
 		wlr_xdg_surface_schedule_configure(view->toplevel->base);
 	}
 }
 
 static void deco_destroy(struct wl_listener *listener, void *data) {
-	struct ztg_view *view = wl_container_of(listener, view, deco_destroy);
+	struct asui_view *view = wl_container_of(listener, view, deco_destroy);
 	wl_list_remove(&view->deco_mode.link);
 	wl_list_remove(&view->deco_destroy.link);
 	view->decoration = NULL;
 }
 
 static void view_destroy(struct wl_listener *listener, void *data) {
-	struct ztg_view *view = wl_container_of(listener, view, destroy);
+	struct asui_view *view = wl_container_of(listener, view, destroy);
 	if (view->decoration) {
 		deco_destroy(&view->deco_destroy, NULL);
 	}
@@ -1026,9 +1215,9 @@ static void view_destroy(struct wl_listener *listener, void *data) {
 }
 
 static void new_toplevel(struct wl_listener *listener, void *data) {
-	struct ztg_server *server = wl_container_of(listener, server, new_toplevel);
+	struct asui_server *server = wl_container_of(listener, server, new_toplevel);
 	struct wlr_xdg_toplevel *toplevel = data;
-	struct ztg_view *view = calloc(1, sizeof(*view));
+	struct asui_view *view = calloc(1, sizeof(*view));
 	view->server = server;
 	view->toplevel = toplevel;
 	view->tree = wlr_scene_xdg_surface_create(server->apps, toplevel->base);
@@ -1051,13 +1240,13 @@ static void new_toplevel(struct wl_listener *listener, void *data) {
 }
 
 static void deco_request_mode(struct wl_listener *listener, void *data) {
-	struct ztg_view *view = wl_container_of(listener, view, deco_mode);
+	struct asui_view *view = wl_container_of(listener, view, deco_mode);
 	deco_apply(view);
 }
 
 static void new_decoration(struct wl_listener *listener, void *data) {
 	struct wlr_xdg_toplevel_decoration_v1 *decoration = data;
-	struct ztg_view *view = view_of_toplevel(decoration->toplevel);
+	struct asui_view *view = view_of_toplevel(decoration->toplevel);
 	if (!view) {
 		return;
 	}
@@ -1072,14 +1261,14 @@ static void new_decoration(struct wl_listener *listener, void *data) {
 /* ---- popups, of windows and of the shell's surfaces ------------------------------------------- */
 
 static void popup_commit(struct wl_listener *listener, void *data) {
-	struct ztg_popup *p = wl_container_of(listener, p, commit);
+	struct asui_popup *p = wl_container_of(listener, p, commit);
 	if (p->popup->base->initial_commit) {
 		wlr_xdg_surface_schedule_configure(p->popup->base);
 	}
 }
 
 static void popup_destroy(struct wl_listener *listener, void *data) {
-	struct ztg_popup *p = wl_container_of(listener, p, destroy);
+	struct asui_popup *p = wl_container_of(listener, p, destroy);
 	wl_list_remove(&p->commit.link);
 	wl_list_remove(&p->destroy.link);
 	free(p);
@@ -1087,7 +1276,7 @@ static void popup_destroy(struct wl_listener *listener, void *data) {
 
 static void new_popup(struct wl_listener *listener, void *data) {
 	struct wlr_xdg_popup *popup = data;
-	struct ztg_popup *p = calloc(1, sizeof(*p));
+	struct asui_popup *p = calloc(1, sizeof(*p));
 	p->popup = popup;
 	p->commit.notify = popup_commit;
 	wl_signal_add(&popup->base->surface->events.commit, &p->commit);
@@ -1103,7 +1292,7 @@ static void new_popup(struct wl_listener *listener, void *data) {
 
 /* ---- the shell's surfaces --------------------------------------------------------------------- */
 
-static struct wlr_scene_tree *tree_for_layer(struct ztg_server *server, enum zwlr_layer_shell_v1_layer layer) {
+static struct wlr_scene_tree *tree_for_layer(struct asui_server *server, enum zwlr_layer_shell_v1_layer layer) {
 	switch (layer) {
 	case ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND:
 		return server->layer_bg;
@@ -1116,10 +1305,10 @@ static struct wlr_scene_tree *tree_for_layer(struct ztg_server *server, enum zwl
 	}
 }
 
-static void layer_focus(struct ztg_server *server) {
+static void layer_focus(struct asui_server *server) {
 	/* a surface that wants the keys (the lock screen's code, say) has them;
 	 * else the app shown */
-	struct ztg_layer *layer;
+	struct asui_layer *layer;
 	wl_list_for_each(layer, &server->layers, link) {
 		struct wlr_layer_surface_v1 *s = layer->surface;
 		if (s->surface->mapped && s->current.keyboard_interactive != ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_NONE &&
@@ -1132,20 +1321,20 @@ static void layer_focus(struct ztg_server *server) {
 }
 
 static void layer_map(struct wl_listener *listener, void *data) {
-	struct ztg_layer *layer = wl_container_of(listener, layer, map);
+	struct asui_layer *layer = wl_container_of(listener, layer, map);
 	wlr_log(WLR_INFO, "shell surface '%s' shown", layer->surface->namespace);
 	arrange(layer->server);
 	layer_focus(layer->server);
 }
 
 static void layer_unmap(struct wl_listener *listener, void *data) {
-	struct ztg_layer *layer = wl_container_of(listener, layer, unmap);
+	struct asui_layer *layer = wl_container_of(listener, layer, unmap);
 	arrange(layer->server);
 	layer_focus(layer->server);
 }
 
 static void layer_commit(struct wl_listener *listener, void *data) {
-	struct ztg_layer *layer = wl_container_of(listener, layer, commit);
+	struct asui_layer *layer = wl_container_of(listener, layer, commit);
 	struct wlr_layer_surface_v1 *s = layer->surface;
 	if (s->initial_commit) {
 		wlr_log(WLR_INFO, "shell surface '%s': first commit (initialized %d, layer %d, anchor %u, size %ux%u, zone %d)",
@@ -1165,26 +1354,26 @@ static void layer_commit(struct wl_listener *listener, void *data) {
 }
 
 static void layer_destroy(struct wl_listener *listener, void *data) {
-	struct ztg_layer *layer = wl_container_of(listener, layer, destroy);
+	struct asui_layer *layer = wl_container_of(listener, layer, destroy);
 	wl_list_remove(&layer->map.link);
 	wl_list_remove(&layer->unmap.link);
 	wl_list_remove(&layer->commit.link);
 	wl_list_remove(&layer->destroy.link);
 	wl_list_remove(&layer->new_popup.link);
 	wl_list_remove(&layer->link);
-	struct ztg_server *server = layer->server;
+	struct asui_server *server = layer->server;
 	free(layer);
 	arrange(server);
 }
 
 static void layer_new_popup(struct wl_listener *listener, void *data) {
-	struct ztg_layer *layer = wl_container_of(listener, layer, new_popup);
+	struct asui_layer *layer = wl_container_of(listener, layer, new_popup);
 	struct wlr_xdg_popup *popup = data;
 	popup->base->data = wlr_scene_xdg_surface_create(layer->scene->tree, popup->base);
 }
 
 static void new_layer(struct wl_listener *listener, void *data) {
-	struct ztg_server *server = wl_container_of(listener, server, new_layer);
+	struct asui_server *server = wl_container_of(listener, server, new_layer);
 	struct wlr_layer_surface_v1 *s = data;
 	if (!s->output) {
 		if (!server->output) {
@@ -1193,7 +1382,7 @@ static void new_layer(struct wl_listener *listener, void *data) {
 		}
 		s->output = server->output;
 	}
-	struct ztg_layer *layer = calloc(1, sizeof(*layer));
+	struct asui_layer *layer = calloc(1, sizeof(*layer));
 	layer->server = server;
 	layer->surface = s;
 	layer->scene = wlr_scene_layer_surface_v1_create(tree_for_layer(server, s->pending.layer), s);
@@ -1214,7 +1403,7 @@ static void new_layer(struct wl_listener *listener, void *data) {
 
 /* ---- the control socket ----------------------------------------------------------------------- */
 
-static void command(struct ztg_server *server, char *line) {
+static void command(struct asui_server *server, char *line) {
 	char *space = strchr(line, ' ');
 	char *arg = space ? space + 1 : "";
 	if (space) {
@@ -1228,7 +1417,7 @@ static void command(struct ztg_server *server, char *line) {
 			return;
 		}
 		*cmd++ = 0;
-		struct ztg_view *view = view_by_key(server, arg);
+		struct asui_view *view = view_by_key(server, arg);
 		if (view) {
 			wlr_log(WLR_INFO, "launch %s: its window", arg);
 			open_view(server, view);
@@ -1255,7 +1444,7 @@ static void command(struct ztg_server *server, char *line) {
 		snprintf(server->pending[slot].key, sizeof(server->pending[slot].key), "%s", arg);
 		wlr_log(WLR_INFO, "launch %s: %s (pid %d)", arg, cmd, server->pending[slot].pid);
 	} else if (strcmp(line, "close") == 0) {
-		struct ztg_view *view = view_by_key(server, arg);
+		struct asui_view *view = view_by_key(server, arg);
 		if (view) {
 			wlr_xdg_toplevel_send_close(view->toplevel);
 		}
@@ -1273,7 +1462,7 @@ static void command(struct ztg_server *server, char *line) {
 }
 
 static int client_readable(int fd, uint32_t mask, void *data) {
-	struct ztg_server *server = data;
+	struct asui_server *server = data;
 	int i;
 	for (i = 0; i < MAX_CLIENTS && server->clients[i] != fd; i++) {
 	}
@@ -1312,7 +1501,7 @@ static int client_readable(int fd, uint32_t mask, void *data) {
 }
 
 static int client_accept(int fd, uint32_t mask, void *data) {
-	struct ztg_server *server = data;
+	struct asui_server *server = data;
 	int c = accept4(fd, NULL, NULL, SOCK_NONBLOCK | SOCK_CLOEXEC);
 	if (c < 0) {
 		return 0;
@@ -1336,12 +1525,12 @@ static int client_accept(int fd, uint32_t mask, void *data) {
 	return 0;
 }
 
-static bool open_socket(struct ztg_server *server) {
+static bool open_socket(struct asui_server *server) {
 	const char *runtime = getenv("XDG_RUNTIME_DIR");
 	if (!runtime) {
 		return false;
 	}
-	snprintf(server->sock_path, sizeof(server->sock_path), "%s/ztglass.sock", runtime);
+	snprintf(server->sock_path, sizeof(server->sock_path), "%s/asui.sock", runtime);
 	unlink(server->sock_path);
 	server->listen_fd = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
 	struct sockaddr_un addr = { .sun_family = AF_UNIX };
@@ -1359,9 +1548,9 @@ static bool open_socket(struct ztg_server *server) {
 /* ---- main ------------------------------------------------------------------------------------ */
 
 int main(int argc, char *argv[]) {
-	wlr_log_init(getenv("ZTGLASS_DEBUG") ? WLR_DEBUG : WLR_INFO, NULL);
-	struct ztg_server server_ = { 0 }, *server = &server_;
-	server->scale = getenv("ZTGLASS_SCALE") ? (float)atof(getenv("ZTGLASS_SCALE")) : 4.0f;
+	wlr_log_init(getenv("ASUI_DEBUG") ? WLR_DEBUG : WLR_INFO, NULL);
+	struct asui_server server_ = { 0 }, *server = &server_;
+	server->scale = getenv("ASUI_SCALE") ? (float)atof(getenv("ASUI_SCALE")) : 4.0f;
 	server->scale = server->scale < 1 ? 1 : server->scale;
 	server->alpha = 1;
 	for (int i = 0; i < MAX_CLIENTS; i++) {
@@ -1384,6 +1573,15 @@ int main(int argc, char *argv[]) {
 	if (!server->backend) {
 		wlr_log(WLR_ERROR, "no backend");
 		return 1;
+	}
+	{
+		int drm_fd = wlr_backend_get_drm_fd(server->backend);
+		drmVersion *version = drm_fd >= 0 ? drmGetVersion(drm_fd) : NULL;
+		server->cache_maint = version && version->name && !strcmp(version->name, "simpledrm") &&
+			!getenv("ASUI_NO_CACHE_DROP");
+		wlr_log(WLR_INFO, "display driver %s%s", version && version->name ? version->name : "?",
+			server->cache_maint ? ": stale cache lines dropped before each frame" : "");
+		if (version) drmFreeVersion(version);
 	}
 	server->renderer = wlr_renderer_autocreate(server->backend);
 	if (!server->renderer) {
@@ -1466,7 +1664,7 @@ int main(int argc, char *argv[]) {
 	wl_signal_add(&server->cursor->events.touch_frame, &server->touch_frame);
 
 	server->seat = wlr_seat_create(server->display, "seat0");
-	wlr_keyboard_init(&server->vkbd, &vkbd_impl, "ztglass-keys");
+	wlr_keyboard_init(&server->vkbd, &vkbd_impl, "asui-keys");
 	struct xkb_keymap *keymap = default_keymap();
 	wlr_keyboard_set_keymap(&server->vkbd, keymap);
 	xkb_keymap_unref(keymap);
@@ -1496,9 +1694,9 @@ int main(int argc, char *argv[]) {
 		return 1;
 	}
 	setenv("WAYLAND_DISPLAY", socket_name, true);
-	setenv("XDG_CURRENT_DESKTOP", "ztGlass", true);
+	setenv("XDG_CURRENT_DESKTOP", "ASUI", true);
 	setenv("XDG_SESSION_TYPE", "wayland", true);
-	wlr_log(WLR_INFO, "ztGlass on WAYLAND_DISPLAY=%s", socket_name);
+	wlr_log(WLR_INFO, "ASUI on WAYLAND_DISPLAY=%s", socket_name);
 	start_shell(server);
 
 	wl_display_run(server->display);

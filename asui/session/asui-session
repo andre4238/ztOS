@@ -1,0 +1,14 @@
+#!/bin/sh
+# What greetd starts for ASUI: the asui compositor, with the shell (home
+# screen, status bar, lock) under it. The log is kept for one run back.
+[ -f /etc/ztos/session.env ] && . /etc/ztos/session.env
+export ASUI_SCALE=${ASUI_SCALE:-${ZTMETRO_SCALE:-4}}
+state=${XDG_STATE_HOME:-$HOME/.local/state}
+mkdir -p "$state"
+log=$state/asui.log
+[ -f "$log" ] && mv "$log" "$log.1"
+# the shell: Slint on the GPU (OpenGL ES through EGL)
+export SLINT_BACKEND=winit-femtovg
+export QT_QPA_PLATFORM=wayland QT_WAYLAND_DISABLE_WINDOWDECORATION=1
+export MOZ_ENABLE_WAYLAND=1
+exec /usr/local/bin/asui -s /usr/local/bin/asui-shell > "$log" 2>&1

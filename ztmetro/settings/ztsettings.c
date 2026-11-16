@@ -1858,9 +1858,10 @@ static double draw_theme(cairo_t *cr) {
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
 	zmc_text(cr, "Shell style", FONT_REGULAR, 13.5, MARGIN, y, 0);
 	y += 24;
-	static const char *const styles[] = { "Metro", "DotMatrix" };
-	for (int k = 0; k < 2; k++) {
-		double btn_w = (zmc.width - 2 * MARGIN - gap) / 2.0;
+	/* and ASUI, the A-SYSTEMS UI: another interface, the session starts in it */
+	static const char *const styles[] = { "Metro", "DotMatrix", "ASUI" };
+	for (int k = 0; k < 3; k++) {
+		double btn_w = (zmc.width - 2 * MARGIN - 2 * gap) / 3.0;
 		double bx = MARGIN + k * (btn_w + gap);
 		if (app.style == k) {
 			zmc_set_rgb(cr, ACCENTS[app.accent].color);
@@ -3369,6 +3370,23 @@ static void activate(int action, int arg) {
 		config_save();
 		break;
 	case ACT_STYLE:
+		if (arg == 2) {
+			/* ASUI: ztos-session (what greetd starts) reads the choice; ending
+			 * ASMS ends the session, and it starts again in ASUI */
+			char path[512];
+			const char *home = getenv("HOME");
+			snprintf(path, sizeof(path), "%s/.config/ztos", home ? home : "");
+			mkdir(path, 0755);
+			snprintf(path, sizeof(path), "%s/.config/ztos/shell", home ? home : "");
+			FILE *f = fopen(path, "w");
+			if (f) {
+				fputs("asui\n", f);
+				fclose(f);
+			}
+			if (access("/usr/local/bin/asui-session", X_OK) == 0 &&
+					system("pkill -x ztmetro 2>/dev/null") != 0) {}
+			break;
+		}
 		app.style = arg;
 		config_save();	/* the shell reads it on SIGHUP and starts the session again in it */
 		break;

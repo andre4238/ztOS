@@ -1,0 +1,1012 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// ASUI, the A-SYSTEMS UI: what the phone shows when no app is in front.
+//
+//   HomeWindow ("ASUI Home")  the wallpaper, a large clock, the search bar, the
+//                             dock (the Start button and four apps) under a
+//                             pane of glass, the app list (Start), the
+//                             wallpaper picker and the lock screen
+//   BarWindow  ("ASUI Bar")   the status bar's strip over an app
+//
+// The compositor (asui) knows the two windows by their titles: the home lies
+// under every app, the bar over them. Glass is the blurred wallpaper, made
+// once, seen through a clipped window at the glass's own place on the screen:
+// it costs nothing to draw and moves with what it is part of.
+
+export struct AppItem {
+    key: string,
+    name: string,
+    icon: image,
+}
+
+export struct WallItem {
+    name: string,
+    thumb: image,
+    current: bool,
+}
+
+// ---- pieces ------------------------------------------------------------------------------
+
+// A pane of glass: what lies under it, blurred, tinted, with a rim of light.
+component Glass inherits Rectangle {
+    in property <image> blur;
+    in property <length> screen-w;
+    in property <length> screen-h;
+    in property <color> tint: #ffffff4d;
+    in property <color> rim: #ffffff99;
+    clip: true;
+    Image {
+        x: -root.absolute-position.x;
+        y: -root.absolute-position.y;
+        width: root.screen-w;
+        height: root.screen-h;
+        source: root.blur;
+        image-fit: fill;
+        image-rendering: smooth;
+    }
+    Rectangle {
+        background: root.tint;
+    }
+    // light from above
+    Rectangle {
+        background: @linear-gradient(180deg, #ffffff38 0%, #ffffff00 45%, #ffffff10 100%);
+    }
+    @children
+    Rectangle {
+        border-radius: root.border-radius;
+        border-width: 1px;
+        border-color: root.rim;
+    }
+}
+
+// The Start button: four panes in a square, ASUI's own mark.
+component StartMark inherits Rectangle {
+    in property <length> size: 30px;
+    width: self.size;
+    height: self.size;
+    property <length> gap: self.size * 0.09;
+    property <length> pane: (self.size - self.gap) / 2;
+    for i in 4: Rectangle {
+        x: Math.mod(i, 2) * (root.pane + root.gap);
+        y: Math.floor(i / 2) * (root.pane + root.gap);
+        width: root.pane;
+        height: root.pane;
+        border-radius: root.pane * 0.18;
+        background: i == 0 ? @linear-gradient(135deg, #7cc0ff 0%, #2f80ff 100%)
+            : i == 1 ? @linear-gradient(135deg, #5aa9ff 0%, #1f6cf0 100%)
+            : i == 2 ? @linear-gradient(135deg, #4c9bff 0%, #1a5fe0 100%)
+            : @linear-gradient(135deg, #3d8bff 0%, #1450cc 100%);
+    }
+}
+
+// Signal, Wi-Fi and battery, right-aligned in a row.
+component StatusIcons inherits Rectangle {
+    in property <int> battery: 100;
+    in property <bool> charging;
+    in property <int> wifi: -1;       // -1 off, 0..3 bars
+    in property <int> signal: -1;     // -1 no service, 0..4
+    in property <color> ink: white;
+    width: 74px;
+    height: 14px;
+    // signal: four rising bars
+    for i in 4: Rectangle {
+        x: i * 4px;
+        y: root.height - (4px + i * 3px) - 1px;
+        width: 3px;
+        height: 4px + i * 3px;
+        border-radius: 1px;
+        background: root.ink;
+        opacity: root.signal > i ? 1.0 : 0.32;
+    }
+    // Wi-Fi: a quarter fan of three arcs and a dot
+    Path {
+        x: 22px;
+        y: 0px;
+        width: 18px;
+        height: 14px;
+        viewbox-width: 18;
+        viewbox-height: 14;
+        stroke: root.ink;
+        stroke-width: 1.8px;
+        opacity: root.wifi >= 3 ? 1.0 : 0.32;
+        commands: "M 1 5 A 11 11 0 0 1 17 5";
+    }
+    Path {
+        x: 22px;
+        y: 0px;
+        width: 18px;
+        height: 14px;
+        viewbox-width: 18;
+        viewbox-height: 14;
+        stroke: root.ink;
+        stroke-width: 1.8px;
+        opacity: root.wifi >= 2 ? 1.0 : 0.32;
+        commands: "M 4 8.2 A 7 7 0 0 1 14 8.2";
+    }
+    Path {
+        x: 22px;
+        y: 0px;
+        width: 18px;
+        height: 14px;
+        viewbox-width: 18;
+        viewbox-height: 14;
+        stroke: root.ink;
+        stroke-width: 1.8px;
+        opacity: root.wifi >= 1 ? 1.0 : 0.32;
+        commands: "M 6.8 11 A 3 3 0 0 1 11.2 11";
+    }
+    // battery: an outline, its charge, a tip
+    Rectangle {
+        x: 46px;
+        y: 1.5px;
+        width: 23px;
+        height: 11px;
+        border-radius: 3px;
+        border-width: 1.2px;
+        border-color: root.ink;
+        opacity: 0.95;
+        Rectangle {
+            x: 2px;
+            y: 2px;
+            height: parent.height - 4px;
+            width: (parent.width - 4px) * Math.max(0.06, Math.min(1.0, root.battery / 100));
+            border-radius: 1.5px;
+            background: root.charging ? #3ddc84 : root.battery <= 15 ? #ff5252 : root.ink;
+        }
+    }
+    Rectangle {
+        x: 70px;
+        y: 5px;
+        width: 2px;
+        height: 4px;
+        border-radius: 1px;
+        background: root.ink;
+    }
+}
+
+// An app: its icon, and its name under it if there is room.
+component AppTile inherits Rectangle {
+    in property <AppItem> app;
+    in property <length> icon-size: 52px;
+    in property <bool> label: true;
+    in property <color> ink: #1b1d22;
+    callback open(string);
+    callback hold(string, string);
+    width: self.icon-size + 24px;
+    height: self.label ? self.icon-size + 26px : self.icon-size;
+    property <bool> held: false;
+    Image {
+        x: (parent.width - root.icon-size) / 2;
+        y: 0px;
+        width: root.icon-size;
+        height: root.icon-size;
+        source: root.app.icon;
+        image-rendering: smooth;
+        opacity: ta.pressed ? 0.7 : 1.0;
+    }
+    if root.label: Text {
+        x: 0px;
+        y: root.icon-size + 6px;
+        width: parent.width;
+        text: root.app.name;
+        font-size: 11.5px;
+        color: root.ink;
+        horizontal-alignment: center;
+        overflow: elide;
+    }
+    ta := TouchArea {
+        pointer-event(e) => {
+            if (e.kind == PointerEventKind.down) {
+                root.held = false;
+            }
+        }
+        clicked => {
+            if (!root.held) {
+                root.open(root.app.key);
+            }
+        }
+    }
+    Timer {
+        interval: 480ms;
+        running: ta.pressed && !root.held;
+        triggered => {
+            root.held = true;
+            root.hold(root.app.key, root.app.name);
+        }
+    }
+}
+
+component Key inherits Rectangle {
+    in property <string> text;
+    in property <bool> dark: false;
+    callback clicked();
+    border-radius: 7px;
+    background: ka.pressed ? #c9cfdb : self.dark ? #d5dae4 : #ffffff;
+    drop-shadow-blur: 1px;
+    drop-shadow-offset-y: 1px;
+    drop-shadow-color: #00000030;
+    Text {
+        text: root.text;
+        color: #1b1d22;
+        font-size: root.text.character-count > 1 ? 13px : 19px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    ka := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+// The search box's keyboard: letters, digits, a space and a key back.
+component Keyboard inherits Rectangle {
+    callback key(string);
+    callback backspace();
+    callback done();
+    in property <length> key-h: 42px;
+    height: 4 * (self.key-h + 8px) + 10px;
+    background: #e8ebf2f0;
+    property <[string]> row1: ["q", "w", "e", "r", "t", "y", "u", "i", "o", "p"];
+    property <[string]> row2: ["a", "s", "d", "f", "g", "h", "j", "k", "l"];
+    property <[string]> row3: ["z", "x", "c", "v", "b", "n", "m"];
+    property <length> kw: (self.width - 12px - 9 * 5px) / 10;
+    for k[i] in root.row1: Key {
+        x: 6px + i * (root.kw + 5px);
+        y: 8px;
+        width: root.kw;
+        height: root.key-h;
+        text: k;
+        clicked => { root.key(k); }
+    }
+    for k[i] in root.row2: Key {
+        x: 6px + (root.kw + 5px) / 2 + i * (root.kw + 5px);
+        y: 8px + (root.key-h + 8px);
+        width: root.kw;
+        height: root.key-h;
+        text: k;
+        clicked => { root.key(k); }
+    }
+    for k[i] in root.row3: Key {
+        x: 6px + 1.5 * (root.kw + 5px) + i * (root.kw + 5px);
+        y: 8px + 2 * (root.key-h + 8px);
+        width: root.kw;
+        height: root.key-h;
+        text: k;
+        clicked => { root.key(k); }
+    }
+    Key {
+        x: root.width - 6px - 1.4 * root.kw;
+        y: 8px + 2 * (root.key-h + 8px);
+        width: 1.4 * root.kw;
+        height: root.key-h;
+        text: "⌫";
+        dark: true;
+        clicked => { root.backspace(); }
+    }
+    Key {
+        x: 6px;
+        y: 8px + 3 * (root.key-h + 8px);
+        width: 2 * root.kw;
+        height: root.key-h;
+        text: "123";
+        dark: true;
+        clicked => { root.key("1"); }
+    }
+    Key {
+        x: 6px + 2 * root.kw + 5px;
+        y: 8px + 3 * (root.key-h + 8px);
+        width: root.width - 12px - 4 * root.kw - 10px;
+        height: root.key-h;
+        text: "space";
+        clicked => { root.key(" "); }
+    }
+    Key {
+        x: root.width - 6px - 2 * root.kw;
+        y: 8px + 3 * (root.key-h + 8px);
+        width: 2 * root.kw;
+        height: root.key-h;
+        text: "Done";
+        dark: true;
+        clicked => { root.done(); }
+    }
+}
+
+// The lock screen: the wallpaper and the time; pushed up, it opens.
+component LockScreen inherits Rectangle {
+    in property <image> wall;
+    in property <string> hours;
+    in property <string> minutes;
+    in property <string> date;
+    in property <int> battery;
+    in property <bool> charging;
+    in property <int> wifi;
+    callback unlocked();
+    property <length> pull: 0;
+    property <bool> going: false;
+    clip: true;
+    content := Rectangle {
+        y: root.going ? -root.height : -root.pull;
+        width: root.width;
+        height: root.height;
+        animate y { duration: ta.pressed ? 0ms : 280ms; easing: cubic-bezier(0.2, 0.85, 0.25, 1); }
+        Image {
+            width: parent.width;
+            height: parent.height;
+            source: root.wall;
+            image-fit: cover;
+        }
+        Rectangle {
+            background: @linear-gradient(180deg, #00000040 0%, #00000000 40%, #00000030 100%);
+        }
+        StatusIcons {
+            x: parent.width - self.width - 16px;
+            y: 12px;
+            battery: root.battery;
+            charging: root.charging;
+            wifi: root.wifi;
+        }
+        Text {
+            y: parent.height * 0.13;
+            width: parent.width;
+            text: root.hours;
+            font-size: 88px;
+            font-weight: 600;
+            color: white;
+            horizontal-alignment: center;
+        }
+        Text {
+            y: parent.height * 0.13 + 98px;
+            width: parent.width;
+            text: root.minutes;
+            font-size: 88px;
+            font-weight: 600;
+            color: white;
+            horizontal-alignment: center;
+        }
+        Text {
+            y: parent.height * 0.13 + 206px;
+            width: parent.width;
+            text: root.date;
+            font-size: 16px;
+            color: #ffffffe0;
+            horizontal-alignment: center;
+        }
+        Text {
+            y: parent.height - 62px;
+            width: parent.width;
+            text: root.charging ? "Charging, " + root.battery + " %   ·   Swipe up to unlock" : "Swipe up to unlock";
+            font-size: 13px;
+            color: #ffffffd0;
+            horizontal-alignment: center;
+        }
+        Rectangle {
+            x: (parent.width - 120px) / 2;
+            y: parent.height - 24px;
+            width: 120px;
+            height: 5px;
+            border-radius: 2.5px;
+            background: #ffffffd8;
+        }
+    }
+    ta := TouchArea {
+        moved => {
+            root.pull = Math.max(0px, self.pressed-y - self.mouse-y);
+        }
+        pointer-event(e) => {
+            if (e.kind == PointerEventKind.up) {
+                if (root.pull > 110px) {
+                    root.going = true;
+                } else {
+                    root.pull = 0;
+                }
+            }
+        }
+    }
+    Timer {
+        interval: 300ms;
+        running: root.going;
+        triggered => {
+            root.going = false;
+            root.pull = 0;
+            root.unlocked();
+        }
+    }
+}
+
+component MenuRow inherits Rectangle {
+    in property <string> text;
+    callback clicked();
+    height: 46px;
+    background: ma.pressed ? #00000012 : transparent;
+    Text {
+        x: 20px;
+        height: parent.height;
+        vertical-alignment: center;
+        text: root.text;
+        font-size: 15px;
+        color: #1b1d22;
+    }
+    ma := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+// ---- the home screen ------------------------------------------------------------------------
+
+export component HomeWindow inherits Window {
+    title: "ASUI Home";
+    no-frame: true;
+    background: #10204a;
+    default-font-family: "Inter";
+    preferred-width: 360px;
+    preferred-height: 760px;
+
+    // from the shell
+    in property <image> wallpaper;
+    in property <image> wallpaper-blur;
+    in property <string> hours: "10";
+    in property <string> minutes: "55";
+    in property <string> date: "Tue, Apr 22";
+    in property <int> battery: 100;
+    in property <bool> charging;
+    in property <int> wifi: -1;
+    in property <int> signal: -1;
+    in property <[AppItem]> dock;
+    in property <[AppItem]> apps;
+    in property <[WallItem]> walls;
+    in property <bool> walls-loading;
+    in-out property <string> query;
+    in-out property <bool> locked: false;
+    in-out property <bool> drawer: false;
+    in-out property <bool> searching: false;
+    in-out property <bool> personalize: false;
+
+    // to the shell
+    callback launch(string);
+    callback key(string);
+    callback backspace();
+    callback clear-query();
+    callback pin(string);
+    callback unpin(string);
+    callback want-walls();
+    callback choose-wall(int);
+    callback switch-to-asms();
+
+    // a long press on an app: its menu
+    property <string> menu-key;
+    property <string> menu-name;
+    property <bool> menu-docked;
+
+    property <length> dock-h: 78px;
+    property <length> dock-y: root.height - self.dock-h - 14px;
+    property <length> search-y: self.dock-y - 62px;
+
+    // ---- the home itself
+    Image {
+        width: root.width;
+        height: root.height;
+        source: root.wallpaper;
+        image-fit: cover;
+    }
+    // a little shade at the top, for the white over a light picture
+    Rectangle {
+        y: 0;
+        height: root.height * 0.45;
+        background: @linear-gradient(180deg, #0000002e 0%, #00000000 100%);
+    }
+
+    // the background: pushed up, the app list; held, the wallpaper picker
+    bg := TouchArea {
+        property <length> pull;
+        property <bool> held;
+        moved => {
+            self.pull = self.pressed-y - self.mouse-y;
+        }
+        pointer-event(e) => {
+            if (e.kind == PointerEventKind.down) {
+                self.pull = 0;
+                self.held = false;
+            }
+            if (e.kind == PointerEventKind.up) {
+                if (self.pull > 70px && !self.held) {
+                    root.drawer = true;
+                }
+                self.pull = 0;
+            }
+        }
+    }
+    Timer {
+        interval: 650ms;
+        running: bg.pressed && Math.abs(bg.pull) < 12px && !bg.held;
+        triggered => {
+            bg.held = true;
+            root.personalize = true;
+            root.want-walls();
+        }
+    }
+
+    StatusIcons {
+        x: root.width - self.width - 16px;
+        y: 12px;
+        battery: root.battery;
+        charging: root.charging;
+        wifi: root.wifi;
+        signal: root.signal;
+    }
+
+    // the time, hours over minutes
+    Text {
+        y: root.height * 0.105;
+        width: root.width;
+        text: root.hours;
+        font-size: 80px;
+        font-weight: 600;
+        color: white;
+        horizontal-alignment: center;
+    }
+    Text {
+        y: root.height * 0.105 + 88px;
+        width: root.width;
+        text: root.minutes;
+        font-size: 80px;
+        font-weight: 600;
+        color: white;
+        horizontal-alignment: center;
+    }
+    Text {
+        y: root.height * 0.105 + 190px;
+        width: root.width;
+        text: root.date;
+        font-size: 15px;
+        color: #ffffffe6;
+        horizontal-alignment: center;
+    }
+
+    // the search bar: opens the app list, searching
+    search := Glass {
+        x: 34px;
+        y: root.search-y;
+        width: root.width - 68px;
+        height: 46px;
+        border-radius: 23px;
+        blur: root.wallpaper-blur;
+        screen-w: root.width;
+        screen-h: root.height;
+        tint: #ffffffb8;
+        rim: #ffffffd0;
+        StartMark {
+            x: 15px;
+            y: (parent.height - self.size) / 2;
+            size: 18px;
+        }
+        Text {
+            x: 46px;
+            width: parent.width - 90px;
+            height: parent.height;
+            vertical-alignment: center;
+            text: "Search apps and files";
+            font-size: 14px;
+            color: #4b5262;
+        }
+        // a microphone
+        Rectangle {
+            x: parent.width - 32px;
+            y: 13px;
+            width: 9px;
+            height: 13px;
+            border-radius: 4.5px;
+            border-width: 1.6px;
+            border-color: #4b5262;
+        }
+        Path {
+            x: parent.width - 35.5px;
+            y: 20px;
+            width: 16px;
+            height: 12px;
+            viewbox-width: 16;
+            viewbox-height: 12;
+            stroke: #4b5262;
+            stroke-width: 1.6px;
+            commands: "M 1 1 A 7 7 0 0 0 15 1 M 8 8 L 8 11";
+        }
+        TouchArea {
+            clicked => {
+                root.drawer = true;
+                root.searching = true;
+            }
+        }
+    }
+
+    // the dock: the Start button and four apps under glass
+    dock := Glass {
+        x: 10px;
+        y: root.dock-y;
+        width: root.width - 20px;
+        height: root.dock-h;
+        border-radius: 28px;
+        blur: root.wallpaper-blur;
+        screen-w: root.width;
+        screen-h: root.height;
+        tint: #ffffff5c;
+        rim: #ffffffb0;
+        property <length> slot: self.width / 5;
+        Rectangle {
+            x: 0;
+            width: parent.slot;
+            height: parent.height;
+            Rectangle {
+                width: 50px;
+                height: 50px;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                border-radius: 14px;
+                background: st.pressed ? #ffffff50 : transparent;
+            }
+            StartMark {
+                x: (parent.width - self.size) / 2;
+                y: (parent.height - self.size) / 2;
+                size: 34px;
+            }
+            st := TouchArea {
+                clicked => {
+                    root.searching = false;
+                    root.drawer = !root.drawer;
+                }
+            }
+        }
+        for app[i] in root.dock: AppTile {
+            x: (i + 1) * parent.slot + (parent.slot - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            app: app;
+            icon-size: 48px;
+            label: false;
+            open(key) => { root.launch(key); }
+            hold(key, name) => {
+                root.menu-key = key;
+                root.menu-name = name;
+                root.menu-docked = true;
+            }
+        }
+    }
+
+    // ---- the app list (Start): acrylic from below
+    if root.drawer: Rectangle {
+        // under it, the home darkens a little; a tap there closes it
+        background: #00000030;
+        TouchArea {
+            clicked => {
+                root.drawer = false;
+                root.searching = false;
+            }
+        }
+    }
+    sheet := Glass {
+        x: 0;
+        y: root.drawer ? root.height * 0.085 : root.height + 30px;
+        animate y { duration: 320ms; easing: cubic-bezier(0.2, 0.9, 0.25, 1); }
+        width: root.width;
+        height: root.height * 0.915 + 40px;
+        border-radius: 28px;
+        blur: root.wallpaper-blur;
+        screen-w: root.width;
+        screen-h: root.height;
+        tint: #f3f6fbe0;
+        rim: #ffffff;
+        // a handle; pulled down, the list goes
+        Rectangle {
+            x: (parent.width - 40px) / 2;
+            y: 9px;
+            width: 40px;
+            height: 4px;
+            border-radius: 2px;
+            background: #1b1d2240;
+        }
+        TouchArea {
+            y: 0;
+            height: 70px;
+            property <length> pull;
+            moved => { self.pull = self.mouse-y - self.pressed-y; }
+            pointer-event(e) => {
+                if (e.kind == PointerEventKind.up) {
+                    if (self.pull > 40px) {
+                        root.drawer = false;
+                        root.searching = false;
+                    }
+                    self.pull = 0;
+                }
+            }
+        }
+        // the search field
+        Rectangle {
+            x: 18px;
+            y: 24px;
+            width: parent.width - 36px;
+            height: 42px;
+            border-radius: 21px;
+            background: #ffffff;
+            border-width: 1px;
+            border-color: root.searching ? #2f80ff : #d9dee8;
+            StartMark {
+                x: 14px;
+                y: (parent.height - self.size) / 2;
+                size: 16px;
+            }
+            Text {
+                x: 42px;
+                width: parent.width - 80px;
+                height: parent.height;
+                vertical-alignment: center;
+                text: root.query == "" ? "Search apps" : root.query;
+                font-size: 14px;
+                color: root.query == "" ? #6b7282 : #1b1d22;
+                overflow: elide;
+            }
+            if root.query != "": Text {
+                x: parent.width - 34px;
+                width: 24px;
+                height: parent.height;
+                vertical-alignment: center;
+                text: "✕";
+                font-size: 14px;
+                color: #6b7282;
+                TouchArea {
+                    clicked => { root.clear-query(); }
+                }
+            }
+            TouchArea {
+                width: parent.width - 40px;
+                clicked => { root.searching = true; }
+            }
+        }
+        Text {
+            x: 24px;
+            y: 82px;
+            text: root.query == "" ? "All apps" : root.apps.length == 0 ? "Nothing found" : "Found";
+            font-size: 15px;
+            font-weight: 600;
+            color: #1b1d22;
+        }
+        Flickable {
+            x: 0;
+            y: 110px;
+            width: parent.width;
+            height: parent.height - 150px - (root.searching ? kb.height : 0px);
+            content-height: Math.ceil(root.apps.length / 4) * 96px + 20px;
+            property <length> cell: (self.width - 16px) / 4;
+            for app[i] in root.apps: AppTile {
+                x: 8px + Math.mod(i, 4) * parent.cell + (parent.cell - self.width) / 2;
+                y: Math.floor(i / 4) * 96px;
+                app: app;
+                icon-size: 52px;
+                open(key) => {
+                    root.drawer = false;
+                    root.searching = false;
+                    root.launch(key);
+                }
+                hold(key, name) => {
+                    root.menu-key = key;
+                    root.menu-name = name;
+                    root.menu-docked = false;
+                }
+            }
+        }
+    }
+    kb := Keyboard {
+        x: 0;
+        y: root.drawer && root.searching ? root.height - self.height : root.height + 10px;
+        animate y { duration: 220ms; easing: ease-out; }
+        width: root.width;
+        key(k) => { root.key(k); }
+        backspace => { root.backspace(); }
+        done => { root.searching = false; }
+    }
+
+    // ---- an app's menu, after a long press
+    if root.menu-key != "": Rectangle {
+        background: #00000055;
+        TouchArea {
+            clicked => { root.menu-key = ""; }
+        }
+        Glass {
+            x: 36px;
+            y: (root.height - self.height) / 2;
+            width: root.width - 72px;
+            height: 170px;
+            border-radius: 20px;
+            blur: root.wallpaper-blur;
+            screen-w: root.width;
+            screen-h: root.height;
+            tint: #f6f8fcf0;
+            Text {
+                x: 20px;
+                y: 18px;
+                width: parent.width - 40px;
+                text: root.menu-name;
+                font-size: 17px;
+                font-weight: 600;
+                color: #1b1d22;
+                overflow: elide;
+            }
+            MenuRow {
+                y: 58px;
+                width: parent.width;
+                text: "Open";
+                clicked => {
+                    root.launch(root.menu-key);
+                    root.menu-key = "";
+                    root.drawer = false;
+                }
+            }
+            MenuRow {
+                y: 108px;
+                width: parent.width;
+                text: root.menu-docked ? "Remove from dock" : "Pin to dock";
+                clicked => {
+                    if (root.menu-docked) {
+                        root.unpin(root.menu-key);
+                    } else {
+                        root.pin(root.menu-key);
+                    }
+                    root.menu-key = "";
+                }
+            }
+        }
+    }
+
+    // ---- personalize: the wallpaper, and the other interface
+    if root.personalize: Rectangle {
+        background: #00000040;
+        TouchArea {
+            clicked => { root.personalize = false; }
+        }
+        Glass {
+            y: root.height * 0.22;
+            width: root.width;
+            height: root.height * 0.78 + 40px;
+            border-radius: 28px;
+            blur: root.wallpaper-blur;
+            screen-w: root.width;
+            screen-h: root.height;
+            tint: #f3f6fbe8;
+            rim: #ffffff;
+            TouchArea {}
+            Text {
+                x: 22px;
+                y: 22px;
+                text: "Personalize";
+                font-size: 22px;
+                font-weight: 600;
+                color: #1b1d22;
+            }
+            Text {
+                x: 22px;
+                y: 56px;
+                text: root.walls-loading ? "Background · loading pictures…" : "Background";
+                font-size: 13px;
+                color: #4b5262;
+            }
+            Flickable {
+                x: 0;
+                y: 80px;
+                width: parent.width;
+                height: parent.height - 80px - 104px;
+                property <length> tw: (self.width - 44px - 2 * 10px) / 3;
+                property <length> th: self.tw * 1.6;
+                content-height: Math.ceil(root.walls.length / 3) * (self.th + 30px) + 10px;
+                for w[i] in root.walls: Rectangle {
+                    x: 22px + Math.mod(i, 3) * (parent.tw + 10px);
+                    y: Math.floor(i / 3) * (parent.th + 30px);
+                    width: parent.tw;
+                    height: parent.th + 24px;
+                    Rectangle {
+                        y: 0;
+                        width: parent.width;
+                        height: parent.height - 24px;
+                        border-radius: 12px;
+                        clip: true;
+                        background: #c9d3e6;
+                        Image {
+                            width: parent.width;
+                            height: parent.height;
+                            source: w.thumb;
+                            image-fit: cover;
+                        }
+                        Rectangle {
+                            border-radius: 12px;
+                            border-width: w.current ? 3px : 1px;
+                            border-color: w.current ? #2f80ff : #00000020;
+                        }
+                    }
+                    Text {
+                        y: parent.height - 20px;
+                        width: parent.width;
+                        text: w.name;
+                        font-size: 11px;
+                        color: #1b1d22;
+                        horizontal-alignment: center;
+                        overflow: elide;
+                    }
+                    TouchArea {
+                        clicked => { root.choose-wall(i); }
+                    }
+                }
+            }
+            // the other interface: ASMS, the A-SYSTEMS Metro Shell
+            Rectangle {
+                x: 22px;
+                y: parent.height - 40px - 84px;
+                width: parent.width - 44px;
+                height: 52px;
+                border-radius: 14px;
+                background: sw.pressed ? #dfe5f0 : #ffffff;
+                border-width: 1px;
+                border-color: #d9dee8;
+                Text {
+                    x: 16px;
+                    height: parent.height;
+                    vertical-alignment: center;
+                    text: "Switch to ASMS (Metro)";
+                    font-size: 14px;
+                    color: #1b1d22;
+                }
+                Text {
+                    x: parent.width - 30px;
+                    height: parent.height;
+                    vertical-alignment: center;
+                    text: "›";
+                    font-size: 20px;
+                    color: #6b7282;
+                }
+                sw := TouchArea {
+                    clicked => { root.switch-to-asms(); }
+                }
+            }
+        }
+    }
+
+    // ---- the lock screen, over all of it
+    if root.locked: LockScreen {
+        width: root.width;
+        height: root.height;
+        wall: root.wallpaper;
+        hours: root.hours;
+        minutes: root.minutes;
+        date: root.date;
+        battery: root.battery;
+        charging: root.charging;
+        wifi: root.wifi;
+        unlocked => { root.locked = false; }
+    }
+}
+
+// ---- the status bar over an app -------------------------------------------------------------
+
+export component BarWindow inherits Window {
+    title: "ASUI Bar";
+    no-frame: true;
+    background: black;
+    default-font-family: "Inter";
+    preferred-width: 360px;
+    preferred-height: 30px;
+    in property <string> time: "10:55";
+    in property <int> battery: 100;
+    in property <bool> charging;
+    in property <int> wifi: -1;
+    in property <int> signal: -1;
+    Text {
+        x: 18px;
+        height: root.height;
+        vertical-alignment: center;
+        text: root.time;
+        font-size: 13px;
+        font-weight: 600;
+        color: white;
+    }
+    StatusIcons {
+        x: root.width - self.width - 16px;
+        y: (root.height - self.height) / 2;
+        battery: root.battery;
+        charging: root.charging;
+        wifi: root.wifi;
+        signal: root.signal;
+    }
+}

@@ -1,0 +1,9 @@
+#!/bin/sh
+# What greetd starts: the interface chosen in ~/.config/ztos/shell, "asui"
+# (the A-SYSTEMS UI) or "asms" (the A-SYSTEMS Metro Shell, the default).
+# Anything else, or an interface that is not installed, is ASMS.
+choice=$(head -n1 "${XDG_CONFIG_HOME:-$HOME/.config}/ztos/shell" 2>/dev/null)
+if [ "$choice" = asui ] && [ -x /usr/local/bin/asui-session ] && [ -x /usr/local/bin/asui-shell ]; then
+	exec /usr/local/bin/asui-session
+fi
+exec /usr/local/bin/ztmetro-session
