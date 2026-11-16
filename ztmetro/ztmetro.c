@@ -95,6 +95,7 @@
 #include <wlr/types/wlr_output_layer.h>
 #include <wlr/types/wlr_buffer.h>
 #include <wlr/render/dmabuf.h>
+#include <sys/mman.h>
 #include <wlr/types/wlr_output_layout.h>
 #include <wlr/types/wlr_pointer.h>
 #include <wlr/types/wlr_seat.h>
@@ -526,6 +527,7 @@ struct zt_server {
 	/* the display driver waits for the GPU's fences before it shows a buffer
 	 * (implicit sync): a frame is flushed, not finished, before it goes */
 	bool implicit_sync;
+	bool cache_maint;	/* simpledrm: drop the CPU's cached copy of what the GPU drew (cache_drop) */
 	int width, height;	/* of the output, in points */
 	uint32_t accent;
 	bool haptics_enabled;
@@ -13682,7 +13684,6 @@ struct qrec {
 static struct qrec qrec_cur[QREC_MAX], qrec_prev[QREC_MAX];
 static int qrec_ncur, qrec_nprev = -1;	/* -1: the panel's pixels are not known */
 static bool qrec_on, qrec_overflow;
-static bool qrec_full_next;	/* the next frame goes whole (qrec_settle) */
 static GLuint qrec_uploaded[256];
 static int qrec_nup;
 static bool qrec_up_overflow;
@@ -13801,8 +13802,7 @@ static void qrec_box(pixman_region32_t *dmg, const struct qrec *r) {
 
 /* The frame's damage against the frame before. False: the frame goes whole. */
 static bool qrec_damage(int W, int H, pixman_region32_t *dmg) {
-	if (getenv("ZTMETRO_FULL_FRAMES") || qrec_nprev < 0 || qrec_overflow || qrec_up_overflow ||
-			qrec_full_next) {
+	if (getenv("ZTMETRO_FULL_FRAMES") || qrec_nprev < 0 || qrec_overflow || qrec_up_overflow) {
 		return false;
 	}
 	for (int i = 0; i < qrec_ncur; i++) {
@@ -13854,34 +13854,94 @@ static void qrec_done(bool committed) {
 	qrec_up_overflow = false;
 }
 
-/* Once things have settled after frames that went in part (QREC_SETTLE_MS
- * without another), one whole frame. On the S10, simpledrm's copy of a part
- * now and then takes a few runs of 16 pixels (one cache line each) from
- * before the GPU's frame: harmless where the next frame copies that part
- * again, but left standing where nothing changes after. The whole frame
- * puts every pixel right; it costs one full copy at the end of a motion. */
-#define QREC_SETTLE_MS	150
+/* ---- the GPU's pixels past the CPU's cache --------------------------------------
+ *
+ * On the S10 the frames are simpledrm's own buffers (shmem, mapped cached
+ * in the kernel), which the GPU (Mali, not cache-coherent) draws into by
+ * DMA, past the CPU's caches. simpledrm copies them to the panel with the
+ * CPU, and nothing drops the lines it read the frames before: where they are
+ * still cached it copies those, runs of 16 pixels (a 64-byte line) from an
+ * older frame. A whole frame's copy (17.5 MB) pushed everything out of the
+ * caches, so it showed only as long as the panel copied whole frames; copying
+ * only what changed, the old lines stay and so did the bits of old frames.
+ * So, the GPU done (glFinish), the lines of what goes to the panel are
+ * cleaned and invalidated to the point of coherency (DC CIVAC, which Linux
+ * lets user space do) through a mapping of the buffer: they act on the
+ * memory itself, whatever the mapping, and simpledrm then reads RAM. */
+struct cache_map {
+	struct wlr_buffer *buffer;
+	struct wl_listener destroy;
+	uint8_t *data;
+	size_t len;
+	uint32_t stride, offset;
+};
+static struct cache_map cache_maps[4];
 
-static int qrec_settle_fire(void *data) {
-	struct zt_server *server = data;
-	qrec_full_next = true;
-	damage(server);
-	return 0;
+static void cache_map_drop(struct cache_map *c) {
+	if (c->data) munmap(c->data, c->len);
+	if (c->buffer) wl_list_remove(&c->destroy.link);
+	memset(c, 0, sizeof(*c));
 }
 
-static void qrec_settle(struct zt_server *server, bool partial) {
-	static struct wl_event_source *timer;
-	if (!partial) {
-		qrec_full_next = false;		/* this one went whole */
-		if (timer) wl_event_source_timer_update(timer, 0);
-		return;
+static void cache_map_gone(struct wl_listener *listener, void *data) {
+	(void)data;
+	struct cache_map *c = wl_container_of(listener, c, destroy);
+	cache_map_drop(c);
+}
+
+static struct cache_map *cache_map_for(struct wlr_buffer *buffer) {
+	for (int i = 0; i < 4; i++) {
+		if (cache_maps[i].buffer == buffer) return &cache_maps[i];
 	}
-	if (!timer) {
-		timer = wl_event_loop_add_timer(server->loop, qrec_settle_fire, server);
+	struct wlr_dmabuf_attributes dmabuf;
+	if (!wlr_buffer_get_dmabuf(buffer, &dmabuf) || dmabuf.n_planes != 1) return NULL;
+	struct cache_map *c = NULL;
+	for (int i = 0; i < 4 && !c; i++) {
+		if (!cache_maps[i].buffer) c = &cache_maps[i];
 	}
-	if (timer) {
-		wl_event_source_timer_update(timer, QREC_SETTLE_MS);
+	if (!c) {
+		c = &cache_maps[0];
+		cache_map_drop(c);
 	}
+	size_t len = (size_t)dmabuf.offset[0] + (size_t)dmabuf.stride[0] * dmabuf.height;
+	void *data = mmap(NULL, len, PROT_READ, MAP_SHARED, dmabuf.fd[0], 0);
+	if (data == MAP_FAILED) {
+		wlr_log(WLR_ERROR, "cache: cannot map the frame (%s); the panel may show old lines", strerror(errno));
+		return NULL;
+	}
+	c->buffer = buffer;
+	c->data = data;
+	c->len = len;
+	c->stride = dmabuf.stride[0];
+	c->offset = dmabuf.offset[0];
+	c->destroy.notify = cache_map_gone;
+	wl_signal_add(&buffer->events.destroy, &c->destroy);
+	return c;
+}
+
+/* the lines of rows y0..y1, columns x0..x1 (pixels, 4 bytes each) dropped */
+static void cache_drop(struct wlr_buffer *buffer, int x0, int y0, int x1, int y1) {
+#if defined(__aarch64__)
+	struct cache_map *c = cache_map_for(buffer);
+	if (!c) return;
+	uint64_t ctr;
+	__asm__ volatile("mrs %0, ctr_el0" : "=r"(ctr));
+	uintptr_t line = (uintptr_t)4 << ((ctr >> 16) & 0xf);	/* DminLine, in bytes */
+	x0 = x0 < 0 ? 0 : x0;
+	y0 = y0 < 0 ? 0 : y0;
+	x1 = x1 > buffer->width ? buffer->width : x1;
+	y1 = y1 > buffer->height ? buffer->height : y1;
+	for (int y = y0; y < y1; y++) {
+		uintptr_t a = (uintptr_t)(c->data + c->offset + (size_t)y * c->stride + (size_t)x0 * 4);
+		uintptr_t end = (uintptr_t)(c->data + c->offset + (size_t)y * c->stride + (size_t)x1 * 4);
+		for (a &= ~(line - 1); a < end; a += line) {
+			__asm__ volatile("dc civac, %0" : : "r"(a) : "memory");
+		}
+	}
+	__asm__ volatile("dsb sy" : : : "memory");
+#else
+	(void)buffer; (void)x0; (void)y0; (void)x1; (void)y1;
+#endif
 }
 
 static void frame_shown(struct zt_server *server, struct wlr_buffer *buffer) {
@@ -14588,6 +14648,18 @@ static void render_frame(struct zt_server *server) {
 	if (partial) {
 		wlr_output_state_set_damage(&state, &changed);
 	}
+	if (server->cache_maint && !plane) {
+		/* what simpledrm will copy, from RAM and not from old cache lines */
+		if (partial) {
+			int nb = 0;
+			pixman_box32_t *b = pixman_region32_rectangles(&changed, &nb);
+			for (int i = 0; i < nb; i++) {
+				cache_drop(buffer, b[i].x1, b[i].y1, b[i].x2, b[i].y2);
+			}
+		} else {
+			cache_drop(buffer, 0, 0, buffer->width, buffer->height);
+		}
+	}
 	pixman_region32_fini(&changed);
 	if (!wlr_output_commit_state(output, &state)) {
 		wlr_log(WLR_ERROR, "output commit failed");
@@ -14595,7 +14667,6 @@ static void render_frame(struct zt_server *server) {
 		wlr_buffer_unlock(buffer);
 	} else {
 		qrec_done(true);
-		qrec_settle(server, partial);
 		wlr_buffer_unlock(buffer);
 		bool was = server->plane_shown;
 		server->plane_shown = plane;
@@ -15221,6 +15292,8 @@ int main(int argc, char *argv[]) {
 		 * DECON is not among them and keeps the glFinish */
 		server.implicit_sync = version && version->name && !strcmp(version->name, "msm") &&
 			!getenv("ZTMETRO_FINISH");	/* to measure the GPU's time per frame */
+		server.cache_maint = version && version->name && !strcmp(version->name, "simpledrm") &&
+			!getenv("ZTMETRO_NO_CACHE_DROP");
 		wlr_log(WLR_INFO, "display driver %s: frames %s", version && version->name ? version->name : "?",
 			server.implicit_sync ? "flushed (implicit sync)" : "finished before they are shown");
 		if (version) drmFreeVersion(version);
